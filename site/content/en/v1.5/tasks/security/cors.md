@@ -234,7 +234,6 @@ If you try to send a request from `http://www.foo.com:8080`, you should also see
 `8080` is not included in the allowed origins.
 
 ```shell
-```shell
 curl -H "Origin: http://www.foo.com:8080" \
   -H "Host: www.example.com" \
   -H "Access-Control-Request-Method: GET" \
@@ -271,4 +270,4 @@ Checkout the [Developer Guide](../../../contributions/develop) to get involved i
 [Gateway]: https://gateway-api.sigs.k8s.io/api-types/gateway
 [HTTPRoute]: https://gateway-api.sigs.k8s.io/api-types/httproute
 [GRPCRoute]: https://gateway-api.sigs.k8s.io/api-types/grpcroute
-[HTTPCORSFilter]: https://gateway-api.sigs.k8s.io/reference/spec#httpcorsfilter
+[HTTPCORSFilter]: https://gateway-api.sigs.k8s.io/reference/1.3/spec#httpcorsfilter

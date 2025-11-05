@@ -18,7 +18,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
-	gwapiv1a2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
 	"sigs.k8s.io/gateway-api/conformance/utils/http"
 	"sigs.k8s.io/gateway-api/conformance/utils/kubernetes"
 	"sigs.k8s.io/gateway-api/conformance/utils/roundtripper"
@@ -31,17 +30,21 @@ import (
 )
 
 func init() {
-	ConformanceTests = append(ConformanceTests, RateLimitCIDRMatchTest)
-	ConformanceTests = append(ConformanceTests, RateLimitHeaderMatchTest)
-	ConformanceTests = append(ConformanceTests, GlobalRateLimitHeaderInvertMatchTest)
-	ConformanceTests = append(ConformanceTests, RateLimitHeadersDisabled)
-	ConformanceTests = append(ConformanceTests, RateLimitBasedJwtClaimsTest)
-	ConformanceTests = append(ConformanceTests, RateLimitMultipleListenersTest)
-	ConformanceTests = append(ConformanceTests, RateLimitHeadersAndCIDRMatchTest)
-	ConformanceTests = append(ConformanceTests, UsageRateLimitTest)
-	ConformanceTests = append(ConformanceTests, RateLimitGlobalSharedCidrMatchTest)
-	ConformanceTests = append(ConformanceTests, RateLimitGlobalSharedGatewayHeaderMatchTest)
-	ConformanceTests = append(ConformanceTests, RateLimitGlobalMergeTest)
+	ConformanceTests = append(ConformanceTests,
+		RateLimitCIDRMatchTest,
+		RateLimitHeaderMatchTest,
+		RateLimitMethodMatchTest,
+		RateLimitPathMatchTest,
+		GlobalRateLimitHeaderInvertMatchTest,
+		RateLimitHeadersDisabled,
+		RateLimitBasedJwtClaimsTest,
+		RateLimitMultipleListenersTest,
+		RateLimitHeadersAndCIDRMatchTest,
+		UsageRateLimitTest,
+		RateLimitGlobalSharedCidrMatchTest,
+		RateLimitGlobalSharedGatewayHeaderMatchTest,
+		RateLimitGlobalMergeTest,
+	)
 }
 
 var RateLimitCIDRMatchTest = suite.ConformanceTest{
@@ -53,15 +56,15 @@ var RateLimitCIDRMatchTest = suite.ConformanceTest{
 			ns := "gateway-conformance-infra"
 			routeNN := types.NamespacedName{Name: "cidr-ratelimit", Namespace: ns}
 			gwNN := types.NamespacedName{Name: "same-namespace", Namespace: ns}
-			gwAddr := kubernetes.GatewayAndHTTPRoutesMustBeAccepted(t, suite.Client, suite.TimeoutConfig, suite.ControllerName, kubernetes.NewGatewayRef(gwNN), routeNN)
+			gwAddr := kubernetes.GatewayAndRoutesMustBeAccepted(t, suite.Client, suite.TimeoutConfig, suite.ControllerName, kubernetes.NewGatewayRef(gwNN), &gwapiv1.HTTPRoute{}, false, routeNN)
 			ratelimitHeader := make(map[string]string)
 			expectOkResp := http.ExpectedResponse{
 				Request: http.Request{
 					Path: "/",
 				},
 				Response: http.Response{
-					StatusCode: 200,
-					Headers:    ratelimitHeader,
+					StatusCodes: []int{200},
+					Headers:     ratelimitHeader,
 				},
 				Namespace: ns,
 			}
@@ -73,7 +76,7 @@ var RateLimitCIDRMatchTest = suite.ConformanceTest{
 					Path: "/",
 				},
 				Response: http.Response{
-					StatusCode: 429,
+					StatusCodes: []int{429},
 				},
 				Namespace: ns,
 			}
@@ -110,6 +113,209 @@ var RateLimitCIDRMatchTest = suite.ConformanceTest{
 	},
 }
 
+var RateLimitMethodMatchTest = suite.ConformanceTest{
+	ShortName:   "RateLimitMethodMatch",
+	Description: "Limit all requests that match method",
+	Manifests:   []string{"testdata/ratelimit-method-match.yaml"},
+	Test: func(t *testing.T, suite *suite.ConformanceTestSuite) {
+		ns := "gateway-conformance-infra"
+		routeNN := types.NamespacedName{Name: "method-ratelimit", Namespace: ns}
+		gwNN := types.NamespacedName{Name: "same-namespace", Namespace: ns}
+		gwAddr := kubernetes.GatewayAndRoutesMustBeAccepted(t, suite.Client, suite.TimeoutConfig, suite.ControllerName, kubernetes.NewGatewayRef(gwNN), &gwapiv1.HTTPRoute{}, false, routeNN)
+
+		t.Run("matched method can got limited", func(t *testing.T) {
+			ratelimitHeader := make(map[string]string)
+
+			expectOkResp := http.ExpectedResponse{
+				Request: http.Request{
+					Path:   "/get",
+					Method: "POST",
+				},
+				Response: http.Response{
+					StatusCode: 200,
+					Headers:    ratelimitHeader,
+				},
+				Namespace: ns,
+			}
+			expectOkResp.Response.Headers["X-Ratelimit-Limit"] = "3, 3;w=3600"
+			expectOkReq := http.MakeRequest(t, &expectOkResp, gwAddr, "HTTP", "http")
+
+			expectLimitResp := http.ExpectedResponse{
+				Request: http.Request{
+					Path:   "/get",
+					Method: "POST",
+				},
+				Response: http.Response{
+					StatusCode: 429,
+				},
+				Namespace: ns,
+			}
+			expectLimitReq := http.MakeRequest(t, &expectLimitResp, gwAddr, "HTTP", "http")
+
+			expectLimitDeleteReq := http.ExpectedResponse{
+				Request: http.Request{
+					Path:   "/get",
+					Method: "DELETE",
+				},
+				Response: http.Response{
+					StatusCode: 429,
+				},
+				Namespace: ns,
+			}
+			expectLimitDeleteResp := http.MakeRequest(t, &expectLimitDeleteReq, gwAddr, "HTTP", "http")
+
+			// should just send exactly 4 requests, and expect 429
+
+			// keep sending requests till get 200 first, that will cost one 200
+			http.MakeRequestAndExpectEventuallyConsistentResponse(t, suite.RoundTripper, suite.TimeoutConfig, gwAddr, expectOkResp)
+
+			// fire the rest of the requests
+			if err := GotExactExpectedResponse(t, 2, suite.RoundTripper, expectOkReq, expectOkResp); err != nil {
+				t.Errorf("failed to get expected response for the first three requests: %v", err)
+			}
+			if err := GotExactExpectedResponse(t, 1, suite.RoundTripper, expectLimitReq, expectLimitResp); err != nil {
+				t.Errorf("failed to get expected response for the last (fourth) request: %v", err)
+			}
+			// Since POST method already consumed the rate limit quota,
+			// DELETE request should be immediately rate limited (both methods share the same counter).
+			if err := GotExactExpectedResponse(t, 1, suite.RoundTripper, expectLimitDeleteResp, expectLimitDeleteReq); err != nil {
+				t.Errorf("failed to get expected response for the limited delete request: %v", err)
+			}
+		})
+
+		t.Run("not matched method cannot got limited", func(t *testing.T) {
+			// it does not require any rate limit header, since this request never be rate limited.
+			expectOkResp := http.ExpectedResponse{
+				Request: http.Request{
+					Path: "/get",
+				},
+				Response: http.Response{
+					StatusCode: 200,
+				},
+				Namespace: ns,
+			}
+			expectOkReq := http.MakeRequest(t, &expectOkResp, gwAddr, "HTTP", "http")
+
+			// send exactly 4 requests, and still expect 200
+
+			// keep sending requests till get 200 first, that will cost one 200
+			http.MakeRequestAndExpectEventuallyConsistentResponse(t, suite.RoundTripper, suite.TimeoutConfig, gwAddr, expectOkResp)
+
+			// fire the rest of the requests
+			if err := GotExactExpectedResponse(t, 3, suite.RoundTripper, expectOkReq, expectOkResp); err != nil {
+				t.Errorf("failed to get expected responses for the request: %v", err)
+			}
+		})
+	},
+}
+
+var RateLimitPathMatchTest = suite.ConformanceTest{
+	ShortName:   "RateLimitPathMatch",
+	Description: "Limit all requests that match path",
+	Manifests:   []string{"testdata/ratelimit-path-match.yaml"},
+	Test: func(t *testing.T, suite *suite.ConformanceTestSuite) {
+		ns := "gateway-conformance-infra"
+		routeNN := types.NamespacedName{Name: "path-ratelimit", Namespace: ns}
+		gwNN := types.NamespacedName{Name: "same-namespace", Namespace: ns}
+		gwAddr := kubernetes.GatewayAndRoutesMustBeAccepted(t, suite.Client, suite.TimeoutConfig, suite.ControllerName, kubernetes.NewGatewayRef(gwNN), &gwapiv1.HTTPRoute{}, false, routeNN)
+
+		t.Run("matched path can got limited", func(t *testing.T) {
+			ratelimitHeader := make(map[string]string)
+
+			expectOkResp := http.ExpectedResponse{
+				Request: http.Request{
+					Path: "/get/specific-path",
+				},
+				Response: http.Response{
+					StatusCode: 200,
+					Headers:    ratelimitHeader,
+				},
+				Namespace: ns,
+			}
+			expectOkResp.Response.Headers["X-Ratelimit-Limit"] = "3, 3;w=3600"
+			expectOkReq := http.MakeRequest(t, &expectOkResp, gwAddr, "HTTP", "http")
+
+			expectLimitResp := http.ExpectedResponse{
+				Request: http.Request{
+					Path: "/get/specific-path",
+				},
+				Response: http.Response{
+					StatusCode: 429,
+				},
+				Namespace: ns,
+			}
+			expectLimitReq := http.MakeRequest(t, &expectLimitResp, gwAddr, "HTTP", "http")
+
+			// should just send exactly 4 requests, and expect 429
+
+			// keep sending requests till get 200 first, that will cost one 200
+			http.MakeRequestAndExpectEventuallyConsistentResponse(t, suite.RoundTripper, suite.TimeoutConfig, gwAddr, expectOkResp)
+
+			// fire the rest of the requests
+			if err := GotExactExpectedResponse(t, 2, suite.RoundTripper, expectOkReq, expectOkResp); err != nil {
+				t.Errorf("failed to get expected response for the first three requests: %v", err)
+			}
+			if err := GotExactExpectedResponse(t, 1, suite.RoundTripper, expectLimitReq, expectLimitResp); err != nil {
+				t.Errorf("failed to get expected response for the last (fourth) request: %v", err)
+			}
+
+			// Subpath should be rate limited due to prefix matching.
+			expectLimitResp = http.ExpectedResponse{
+				Request: http.Request{
+					Path: "/get/specific-path/subpath",
+				},
+				Response: http.Response{
+					StatusCode: 429,
+				},
+				Namespace: ns,
+			}
+			expectLimitReq = http.MakeRequest(t, &expectLimitResp, gwAddr, "HTTP", "http")
+			if err := GotExactExpectedResponse(t, 1, suite.RoundTripper, expectLimitReq, expectLimitResp); err != nil {
+				t.Errorf("failed to get expected response for the last (fourth) request: %v", err)
+			}
+
+			// Different path (contains the path prefix) should not be rate limited.
+			expectOkResp = http.ExpectedResponse{
+				Request: http.Request{
+					Path: "/get/specific-path2",
+				},
+				Response: http.Response{
+					StatusCode: 200,
+				},
+				Namespace: ns,
+			}
+			expectOkReq = http.MakeRequest(t, &expectOkResp, gwAddr, "HTTP", "http")
+			if err := GotExactExpectedResponse(t, 1, suite.RoundTripper, expectOkReq, expectOkResp); err != nil {
+				t.Errorf("failed to get expected response for the last (fourth) request: %v", err)
+			}
+		})
+
+		t.Run("not matched path cannot got limited", func(t *testing.T) {
+			// it does not require any rate limit header, since this request never be rate limited.
+			expectOkResp := http.ExpectedResponse{
+				Request: http.Request{
+					Path: "/get/no-specific-path",
+				},
+				Response: http.Response{
+					StatusCode: 200,
+				},
+				Namespace: ns,
+			}
+			expectOkReq := http.MakeRequest(t, &expectOkResp, gwAddr, "HTTP", "http")
+
+			// send exactly 4 requests, and still expect 200
+
+			// keep sending requests till get 200 first, that will cost one 200
+			http.MakeRequestAndExpectEventuallyConsistentResponse(t, suite.RoundTripper, suite.TimeoutConfig, gwAddr, expectOkResp)
+
+			// fire the rest of the requests
+			if err := GotExactExpectedResponse(t, 3, suite.RoundTripper, expectOkReq, expectOkResp); err != nil {
+				t.Errorf("failed to get expected responses for the request: %v", err)
+			}
+		})
+	},
+}
+
 var RateLimitHeaderMatchTest = suite.ConformanceTest{
 	ShortName:   "RateLimitHeaderMatch",
 	Description: "Limit all requests that match headers",
@@ -118,7 +324,7 @@ var RateLimitHeaderMatchTest = suite.ConformanceTest{
 		ns := "gateway-conformance-infra"
 		routeNN := types.NamespacedName{Name: "header-ratelimit", Namespace: ns}
 		gwNN := types.NamespacedName{Name: "same-namespace", Namespace: ns}
-		gwAddr := kubernetes.GatewayAndHTTPRoutesMustBeAccepted(t, suite.Client, suite.TimeoutConfig, suite.ControllerName, kubernetes.NewGatewayRef(gwNN), routeNN)
+		gwAddr := kubernetes.GatewayAndRoutesMustBeAccepted(t, suite.Client, suite.TimeoutConfig, suite.ControllerName, kubernetes.NewGatewayRef(gwNN), &gwapiv1.HTTPRoute{}, false, routeNN)
 
 		t.Run("all matched headers can got limited", func(t *testing.T) {
 			requestHeaders := map[string]string{
@@ -133,8 +339,8 @@ var RateLimitHeaderMatchTest = suite.ConformanceTest{
 					Headers: requestHeaders,
 				},
 				Response: http.Response{
-					StatusCode: 200,
-					Headers:    ratelimitHeader,
+					StatusCodes: []int{200},
+					Headers:     ratelimitHeader,
 				},
 				Namespace: ns,
 			}
@@ -147,7 +353,7 @@ var RateLimitHeaderMatchTest = suite.ConformanceTest{
 					Headers: requestHeaders,
 				},
 				Response: http.Response{
-					StatusCode: 429,
+					StatusCodes: []int{429},
 				},
 				Namespace: ns,
 			}
@@ -179,7 +385,7 @@ var RateLimitHeaderMatchTest = suite.ConformanceTest{
 					Headers: requestHeaders,
 				},
 				Response: http.Response{
-					StatusCode: 200,
+					StatusCodes: []int{200},
 				},
 				Namespace: ns,
 			}
@@ -206,7 +412,7 @@ var GlobalRateLimitHeaderInvertMatchTest = suite.ConformanceTest{
 		ns := "gateway-conformance-infra"
 		routeNN := types.NamespacedName{Name: "header-ratelimit", Namespace: ns}
 		gwNN := types.NamespacedName{Name: "same-namespace", Namespace: ns}
-		gwAddr := kubernetes.GatewayAndHTTPRoutesMustBeAccepted(t, suite.Client, suite.TimeoutConfig, suite.ControllerName, kubernetes.NewGatewayRef(gwNN), routeNN)
+		gwAddr := kubernetes.GatewayAndRoutesMustBeAccepted(t, suite.Client, suite.TimeoutConfig, suite.ControllerName, kubernetes.NewGatewayRef(gwNN), &gwapiv1.HTTPRoute{}, false, routeNN)
 
 		t.Run("all matched headers got limited", func(t *testing.T) {
 			requestHeaders := map[string]string{
@@ -220,8 +426,8 @@ var GlobalRateLimitHeaderInvertMatchTest = suite.ConformanceTest{
 					Headers: requestHeaders,
 				},
 				Response: http.Response{
-					StatusCode: 200,
-					Headers:    ratelimitHeader,
+					StatusCodes: []int{200},
+					Headers:     ratelimitHeader,
 				},
 				Namespace: ns,
 			}
@@ -234,7 +440,7 @@ var GlobalRateLimitHeaderInvertMatchTest = suite.ConformanceTest{
 					Headers: requestHeaders,
 				},
 				Response: http.Response{
-					StatusCode: 429,
+					StatusCodes: []int{429},
 				},
 				Namespace: ns,
 			}
@@ -266,7 +472,7 @@ var GlobalRateLimitHeaderInvertMatchTest = suite.ConformanceTest{
 					Headers: requestHeaders,
 				},
 				Response: http.Response{
-					StatusCode: 200,
+					StatusCodes: []int{200},
 				},
 				Namespace: ns,
 			}
@@ -293,7 +499,7 @@ var RateLimitHeadersDisabled = suite.ConformanceTest{
 		ns := "gateway-conformance-infra"
 		routeNN := types.NamespacedName{Name: "ratelimit-headers-disabled", Namespace: ns}
 		gwNN := types.NamespacedName{Name: "same-namespace", Namespace: ns}
-		gwAddr := kubernetes.GatewayAndHTTPRoutesMustBeAccepted(t, suite.Client, suite.TimeoutConfig, suite.ControllerName, kubernetes.NewGatewayRef(gwNN), routeNN)
+		gwAddr := kubernetes.GatewayAndRoutesMustBeAccepted(t, suite.Client, suite.TimeoutConfig, suite.ControllerName, kubernetes.NewGatewayRef(gwNN), &gwapiv1.HTTPRoute{}, false, routeNN)
 
 		t.Run("all matched headers can get limited", func(t *testing.T) {
 			requestHeaders := map[string]string{
@@ -308,8 +514,8 @@ var RateLimitHeadersDisabled = suite.ConformanceTest{
 					Headers: requestHeaders,
 				},
 				Response: http.Response{
-					StatusCode: 200,
-					Headers:    ratelimitHeader,
+					StatusCodes: []int{200},
+					Headers:     ratelimitHeader,
 				},
 				Namespace: ns,
 			}
@@ -322,7 +528,7 @@ var RateLimitHeadersDisabled = suite.ConformanceTest{
 					Headers: requestHeaders,
 				},
 				Response: http.Response{
-					StatusCode: 429,
+					StatusCodes: []int{429},
 				},
 				Namespace: ns,
 			}
@@ -354,7 +560,7 @@ var RateLimitHeadersDisabled = suite.ConformanceTest{
 					Headers: requestHeaders,
 				},
 				Response: http.Response{
-					StatusCode: 200,
+					StatusCodes: []int{200},
 				},
 				Namespace: ns,
 			}
@@ -382,7 +588,7 @@ var RateLimitBasedJwtClaimsTest = suite.ConformanceTest{
 			ns := "gateway-conformance-infra"
 			routeNN := types.NamespacedName{Name: "http-ratelimit-based-jwt-claims", Namespace: ns}
 			gwNN := types.NamespacedName{Name: "same-namespace", Namespace: ns}
-			gwAddr := kubernetes.GatewayAndHTTPRoutesMustBeAccepted(t, suite.Client, suite.TimeoutConfig, suite.ControllerName, kubernetes.NewGatewayRef(gwNN), routeNN)
+			gwAddr := kubernetes.GatewayAndRoutesMustBeAccepted(t, suite.Client, suite.TimeoutConfig, suite.ControllerName, kubernetes.NewGatewayRef(gwNN), &gwapiv1.HTTPRoute{}, false, routeNN)
 
 			preCount, err := OverLimitCount(suite)
 			require.NoError(t, err)
@@ -392,7 +598,7 @@ var RateLimitBasedJwtClaimsTest = suite.ConformanceTest{
 					Path: "/foo",
 				},
 				Response: http.Response{
-					StatusCode: 200,
+					StatusCodes: []int{200},
 				},
 				Namespace: ns,
 			}
@@ -402,7 +608,7 @@ var RateLimitBasedJwtClaimsTest = suite.ConformanceTest{
 					Path: "/foo",
 				},
 				Response: http.Response{
-					StatusCode: 429,
+					StatusCodes: []int{429},
 				},
 				Namespace: ns,
 			}
@@ -421,8 +627,8 @@ var RateLimitBasedJwtClaimsTest = suite.ConformanceTest{
 					},
 				},
 				Response: http.Response{
-					StatusCode: 200,
-					Headers:    ratelimitHeader,
+					StatusCodes: []int{200},
+					Headers:     ratelimitHeader,
 				},
 				Namespace: ns,
 			}
@@ -439,7 +645,7 @@ var RateLimitBasedJwtClaimsTest = suite.ConformanceTest{
 					Headers: DifTokenHeader,
 				},
 				Response: http.Response{
-					StatusCode: 200,
+					StatusCodes: []int{200},
 				},
 				Namespace: ns,
 			}
@@ -453,7 +659,7 @@ var RateLimitBasedJwtClaimsTest = suite.ConformanceTest{
 					Path: "/bar",
 				},
 				Response: http.Response{
-					StatusCode: 200,
+					StatusCodes: []int{200},
 				},
 				Namespace: ns,
 			}
@@ -485,7 +691,7 @@ var RateLimitBasedJwtClaimsTest = suite.ConformanceTest{
 					Path: "/foo",
 				},
 				Response: http.Response{
-					StatusCode: 401,
+					StatusCodes: []int{401},
 				},
 				Namespace: ns,
 			}
@@ -515,13 +721,10 @@ var RateLimitMultipleListenersTest = suite.ConformanceTest{
 			ns := "gateway-conformance-infra"
 			routeNN := types.NamespacedName{Name: "cidr-ratelimit", Namespace: ns}
 			gwNN := types.NamespacedName{Name: "eg-rate-limit", Namespace: ns}
-			gwAddr := kubernetes.GatewayAndHTTPRoutesMustBeAccepted(t, suite.Client, suite.TimeoutConfig, suite.ControllerName, kubernetes.NewGatewayRef(gwNN), routeNN)
-			gwIP, _, err := net.SplitHostPort(gwAddr)
-			require.NoError(t, err)
+			gwHost := kubernetes.GatewayAndRoutesMustBeAccepted(t, suite.Client, suite.TimeoutConfig, suite.ControllerName, kubernetes.NewGatewayRef(gwNN), &gwapiv1.HTTPRoute{}, false, routeNN)
 
-			gwPorts := []string{"80", "8080"}
-			for _, port := range gwPorts {
-				gwAddr = net.JoinHostPort(gwIP, port)
+			for _, port := range []string{"80", "8080"} {
+				gwAddr := net.JoinHostPort(gwHost, port)
 
 				ratelimitHeader := make(map[string]string)
 				expectOkResp := http.ExpectedResponse{
@@ -529,8 +732,8 @@ var RateLimitMultipleListenersTest = suite.ConformanceTest{
 						Path: "/",
 					},
 					Response: http.Response{
-						StatusCode: 200,
-						Headers:    ratelimitHeader,
+						StatusCodes: []int{200},
+						Headers:     ratelimitHeader,
 					},
 					Namespace: ns,
 				}
@@ -542,7 +745,7 @@ var RateLimitMultipleListenersTest = suite.ConformanceTest{
 						Path: "/",
 					},
 					Response: http.Response{
-						StatusCode: 429,
+						StatusCodes: []int{429},
 					},
 					Namespace: ns,
 				}
@@ -573,7 +776,7 @@ var RateLimitHeadersAndCIDRMatchTest = suite.ConformanceTest{
 		ns := "gateway-conformance-infra"
 		routeNN := types.NamespacedName{Name: "header-and-cidr-ratelimit", Namespace: ns}
 		gwNN := types.NamespacedName{Name: "same-namespace", Namespace: ns}
-		gwAddr := kubernetes.GatewayAndHTTPRoutesMustBeAccepted(t, suite.Client, suite.TimeoutConfig, suite.ControllerName, kubernetes.NewGatewayRef(gwNN), routeNN)
+		gwAddr := kubernetes.GatewayAndRoutesMustBeAccepted(t, suite.Client, suite.TimeoutConfig, suite.ControllerName, kubernetes.NewGatewayRef(gwNN), &gwapiv1.HTTPRoute{}, false, routeNN)
 
 		t.Run("all matched both headers and cidr can got limited", func(t *testing.T) {
 			if IPFamily == "ipv6" {
@@ -592,8 +795,8 @@ var RateLimitHeadersAndCIDRMatchTest = suite.ConformanceTest{
 					Headers: requestHeaders,
 				},
 				Response: http.Response{
-					StatusCode: 200,
-					Headers:    ratelimitHeader,
+					StatusCodes: []int{200},
+					Headers:     ratelimitHeader,
 				},
 				Namespace: ns,
 			}
@@ -606,7 +809,7 @@ var RateLimitHeadersAndCIDRMatchTest = suite.ConformanceTest{
 					Headers: requestHeaders,
 				},
 				Response: http.Response{
-					StatusCode: 429,
+					StatusCodes: []int{429},
 				},
 				Namespace: ns,
 			}
@@ -638,7 +841,7 @@ var RateLimitHeadersAndCIDRMatchTest = suite.ConformanceTest{
 					Headers: requestHeaders,
 				},
 				Response: http.Response{
-					StatusCode: 200,
+					StatusCodes: []int{200},
 				},
 				Namespace: ns,
 			}
@@ -662,7 +865,7 @@ var RateLimitHeadersAndCIDRMatchTest = suite.ConformanceTest{
 					Path: "/get",
 				},
 				Response: http.Response{
-					StatusCode: 200,
+					StatusCodes: []int{200},
 				},
 				Namespace: ns,
 			}
@@ -689,10 +892,10 @@ var UsageRateLimitTest = suite.ConformanceTest{
 		ns := "gateway-conformance-infra"
 		routeNN := types.NamespacedName{Name: "usage-rate-limit", Namespace: ns}
 		gwNN := types.NamespacedName{Name: "same-namespace", Namespace: ns}
-		gwAddr := kubernetes.GatewayAndHTTPRoutesMustBeAccepted(t, suite.Client, suite.TimeoutConfig, suite.ControllerName, kubernetes.NewGatewayRef(gwNN), routeNN)
+		gwAddr := kubernetes.GatewayAndRoutesMustBeAccepted(t, suite.Client, suite.TimeoutConfig, suite.ControllerName, kubernetes.NewGatewayRef(gwNN), &gwapiv1.HTTPRoute{}, false, routeNN)
 
 		// Waiting for the extproc service to be ready.
-		ancestorRef := gwapiv1a2.ParentReference{
+		ancestorRef := gwapiv1.ParentReference{
 			Group:     gatewayapi.GroupPtr(gwapiv1.GroupName),
 			Kind:      gatewayapi.KindPtr(resource.KindGateway),
 			Namespace: gatewayapi.NamespacePtr(gwNN.Namespace),
@@ -701,7 +904,7 @@ var UsageRateLimitTest = suite.ConformanceTest{
 		EnvoyExtensionPolicyMustBeAccepted(t, suite.Client, types.NamespacedName{Name: "usage-rate-limit", Namespace: ns}, suite.ControllerName, ancestorRef)
 		podReady := corev1.PodCondition{Type: corev1.PodReady, Status: corev1.ConditionTrue}
 		// Wait for the grpc ext auth service pod to be ready
-		WaitForPods(t, suite.Client, ns, map[string]string{"app": "grpc-ext-proc"}, corev1.PodRunning, podReady)
+		WaitForPods(t, suite.Client, ns, map[string]string{"app": "grpc-ext-proc"}, corev1.PodRunning, &podReady)
 
 		requestHeaders := map[string]string{"x-user-id": "one"}
 
@@ -711,7 +914,7 @@ var UsageRateLimitTest = suite.ConformanceTest{
 				Path:    "/get",
 				Headers: requestHeaders,
 			},
-			Response:  http.Response{StatusCode: 200, Headers: ratelimitHeader},
+			Response:  http.Response{StatusCodes: []int{200}, Headers: ratelimitHeader},
 			Namespace: ns,
 		}
 		expectOkResp.Response.Headers["X-Ratelimit-Limit"] = "21, 21;w=3600"
@@ -723,7 +926,7 @@ var UsageRateLimitTest = suite.ConformanceTest{
 				Headers: requestHeaders,
 			},
 			Response: http.Response{
-				StatusCode: 429,
+				StatusCodes: []int{429},
 			},
 			Namespace: ns,
 		}
@@ -766,8 +969,8 @@ var RateLimitGlobalSharedCidrMatchTest = suite.ConformanceTest{
 					Path: "/foo", // First route path
 				},
 				Response: http.Response{
-					StatusCode: 200,
-					Headers:    ratelimitHeader,
+					StatusCodes: []int{200},
+					Headers:     ratelimitHeader,
 				},
 				Namespace: ns,
 			}
@@ -778,8 +981,8 @@ var RateLimitGlobalSharedCidrMatchTest = suite.ConformanceTest{
 					Path: "/bar", // Second route path
 				},
 				Response: http.Response{
-					StatusCode: 200,
-					Headers:    ratelimitHeader,
+					StatusCodes: []int{200},
+					Headers:     ratelimitHeader,
 				},
 				Namespace: ns,
 			}
@@ -790,7 +993,7 @@ var RateLimitGlobalSharedCidrMatchTest = suite.ConformanceTest{
 					Path: "/bar", // Path for testing the limit on the second route
 				},
 				Response: http.Response{
-					StatusCode: 429,
+					StatusCodes: []int{429},
 				},
 				Namespace: ns,
 			}
@@ -870,8 +1073,8 @@ var RateLimitGlobalSharedGatewayHeaderMatchTest = suite.ConformanceTest{
 					Headers: requestHeaders,
 				},
 				Response: http.Response{
-					StatusCode: 200,
-					Headers:    ratelimitHeader,
+					StatusCodes: []int{200},
+					Headers:     ratelimitHeader,
 				},
 				Namespace: ns,
 			}
@@ -883,8 +1086,8 @@ var RateLimitGlobalSharedGatewayHeaderMatchTest = suite.ConformanceTest{
 					Headers: requestHeaders,
 				},
 				Response: http.Response{
-					StatusCode: 200,
-					Headers:    ratelimitHeader,
+					StatusCodes: []int{200},
+					Headers:     ratelimitHeader,
 				},
 				Namespace: ns,
 			}
@@ -896,7 +1099,7 @@ var RateLimitGlobalSharedGatewayHeaderMatchTest = suite.ConformanceTest{
 					Headers: requestHeaders,
 				},
 				Response: http.Response{
-					StatusCode: 429,
+					StatusCodes: []int{429},
 				},
 				Namespace: ns,
 			}
@@ -963,9 +1166,9 @@ var RateLimitGlobalMergeTest = suite.ConformanceTest{
 		t.Run("shared_route_policy_x-user-id=one", func(t *testing.T) {
 			headers := map[string]string{"x-user-id": "one"}
 
-			expectOk1 := http.ExpectedResponse{Request: http.Request{Path: "/bar", Headers: headers}, Response: http.Response{StatusCode: 200}, Namespace: ns}
-			expectOk2 := http.ExpectedResponse{Request: http.Request{Path: "/foo", Headers: headers}, Response: http.Response{StatusCode: 200}, Namespace: ns}
-			expectLimit := http.ExpectedResponse{Request: http.Request{Path: "/foo", Headers: headers}, Response: http.Response{StatusCode: 429}, Namespace: ns}
+			expectOk1 := http.ExpectedResponse{Request: http.Request{Path: "/bar", Headers: headers}, Response: http.Response{StatusCodes: []int{200}}, Namespace: ns}
+			expectOk2 := http.ExpectedResponse{Request: http.Request{Path: "/foo", Headers: headers}, Response: http.Response{StatusCodes: []int{200}}, Namespace: ns}
+			expectLimit := http.ExpectedResponse{Request: http.Request{Path: "/foo", Headers: headers}, Response: http.Response{StatusCodes: []int{429}}, Namespace: ns}
 
 			require.Eventually(t, func() bool {
 				_, cRes, err := suite.RoundTripper.CaptureRoundTrip(http.MakeRequest(t, &expectOk1, gwAddr2, "HTTP", "http"))
@@ -989,10 +1192,10 @@ var RateLimitGlobalMergeTest = suite.ConformanceTest{
 		t.Run("unshared_route_policy_x-user-id=two", func(t *testing.T) {
 			headers := map[string]string{"x-user-id": "two"}
 
-			okFoo := http.ExpectedResponse{Request: http.Request{Path: "/foo", Headers: headers}, Response: http.Response{StatusCode: 200}, Namespace: ns}
-			limitFoo := http.ExpectedResponse{Request: http.Request{Path: "/foo", Headers: headers}, Response: http.Response{StatusCode: 429}, Namespace: ns}
-			okBar := http.ExpectedResponse{Request: http.Request{Path: "/bar", Headers: headers}, Response: http.Response{StatusCode: 200}, Namespace: ns}
-			limitBar := http.ExpectedResponse{Request: http.Request{Path: "/bar", Headers: headers}, Response: http.Response{StatusCode: 429}, Namespace: ns}
+			okFoo := http.ExpectedResponse{Request: http.Request{Path: "/foo", Headers: headers}, Response: http.Response{StatusCodes: []int{200}}, Namespace: ns}
+			limitFoo := http.ExpectedResponse{Request: http.Request{Path: "/foo", Headers: headers}, Response: http.Response{StatusCodes: []int{429}}, Namespace: ns}
+			okBar := http.ExpectedResponse{Request: http.Request{Path: "/bar", Headers: headers}, Response: http.Response{StatusCodes: []int{200}}, Namespace: ns}
+			limitBar := http.ExpectedResponse{Request: http.Request{Path: "/bar", Headers: headers}, Response: http.Response{StatusCodes: []int{429}}, Namespace: ns}
 
 			http.MakeRequestAndExpectEventuallyConsistentResponse(t, suite.RoundTripper, suite.TimeoutConfig, gwAddr1, okFoo)
 
@@ -1018,9 +1221,9 @@ var RateLimitGlobalMergeTest = suite.ConformanceTest{
 		t.Run("shared_gateway_policy_x-user-id=three", func(t *testing.T) {
 			headers := map[string]string{"x-user-id": "three"}
 
-			ok1 := http.ExpectedResponse{Request: http.Request{Path: "/bar", Headers: headers}, Response: http.Response{StatusCode: 200}, Namespace: ns}
-			ok2 := http.ExpectedResponse{Request: http.Request{Path: "/foo", Headers: headers}, Response: http.Response{StatusCode: 200}, Namespace: ns}
-			limit := http.ExpectedResponse{Request: http.Request{Path: "/foo", Headers: headers}, Response: http.Response{StatusCode: 429}, Namespace: ns}
+			ok1 := http.ExpectedResponse{Request: http.Request{Path: "/bar", Headers: headers}, Response: http.Response{StatusCodes: []int{200}}, Namespace: ns}
+			ok2 := http.ExpectedResponse{Request: http.Request{Path: "/foo", Headers: headers}, Response: http.Response{StatusCodes: []int{200}}, Namespace: ns}
+			limit := http.ExpectedResponse{Request: http.Request{Path: "/foo", Headers: headers}, Response: http.Response{StatusCodes: []int{429}}, Namespace: ns}
 
 			http.MakeRequestAndExpectEventuallyConsistentResponse(t, suite.RoundTripper, suite.TimeoutConfig, gwAddr2, ok1)
 
@@ -1037,10 +1240,10 @@ var RateLimitGlobalMergeTest = suite.ConformanceTest{
 		t.Run("unshared_gateway_policy__x-user-id=four", func(t *testing.T) {
 			headers := map[string]string{"x-user-id": "four"}
 
-			okFoo := http.ExpectedResponse{Request: http.Request{Path: "/foo", Headers: headers}, Response: http.Response{StatusCode: 200}, Namespace: ns}
-			limitFoo := http.ExpectedResponse{Request: http.Request{Path: "/foo", Headers: headers}, Response: http.Response{StatusCode: 429}, Namespace: ns}
-			okBar := http.ExpectedResponse{Request: http.Request{Path: "/bar", Headers: headers}, Response: http.Response{StatusCode: 200}, Namespace: ns}
-			limitBar := http.ExpectedResponse{Request: http.Request{Path: "/bar", Headers: headers}, Response: http.Response{StatusCode: 429}, Namespace: ns}
+			okFoo := http.ExpectedResponse{Request: http.Request{Path: "/foo", Headers: headers}, Response: http.Response{StatusCodes: []int{200}}, Namespace: ns}
+			limitFoo := http.ExpectedResponse{Request: http.Request{Path: "/foo", Headers: headers}, Response: http.Response{StatusCodes: []int{429}}, Namespace: ns}
+			okBar := http.ExpectedResponse{Request: http.Request{Path: "/bar", Headers: headers}, Response: http.Response{StatusCodes: []int{200}}, Namespace: ns}
+			limitBar := http.ExpectedResponse{Request: http.Request{Path: "/bar", Headers: headers}, Response: http.Response{StatusCodes: []int{429}}, Namespace: ns}
 
 			http.MakeRequestAndExpectEventuallyConsistentResponse(t, suite.RoundTripper, suite.TimeoutConfig, gwAddr1, okFoo)
 
@@ -1064,8 +1267,8 @@ var RateLimitGlobalMergeTest = suite.ConformanceTest{
 		})
 
 		t.Run("shared_no_client_selectors", func(t *testing.T) {
-			ok1 := http.ExpectedResponse{Request: http.Request{Path: "/bar"}, Response: http.Response{StatusCode: 200}, Namespace: ns}
-			limit := http.ExpectedResponse{Request: http.Request{Path: "/bar"}, Response: http.Response{StatusCode: 429}, Namespace: ns}
+			ok1 := http.ExpectedResponse{Request: http.Request{Path: "/bar"}, Response: http.Response{StatusCodes: []int{200}}, Namespace: ns}
+			limit := http.ExpectedResponse{Request: http.Request{Path: "/bar"}, Response: http.Response{StatusCodes: []int{429}}, Namespace: ns}
 
 			http.MakeRequestAndExpectEventuallyConsistentResponse(t, suite.RoundTripper, suite.TimeoutConfig, gwAddr1, ok1)
 
@@ -1076,6 +1279,9 @@ var RateLimitGlobalMergeTest = suite.ConformanceTest{
 	},
 }
 
+// GotExactExpectedResponse consumes a request value; keeping value semantics avoids threading pointers through many tests.
+//
+//nolint:gocritic
 func GotExactExpectedResponse(t *testing.T, n int, r roundtripper.RoundTripper, req roundtripper.Request, resp http.ExpectedResponse) error {
 	for i := 0; i < n; i++ {
 		cReq, cRes, err := r.CaptureRoundTrip(req)
@@ -1083,7 +1289,7 @@ func GotExactExpectedResponse(t *testing.T, n int, r roundtripper.RoundTripper, 
 			return err
 		}
 
-		if err = http.CompareRequest(t, &req, cReq, cRes, resp); err != nil {
+		if err = http.CompareRoundTrip(t, &req, cReq, cRes, resp); err != nil {
 			return err
 		}
 	}

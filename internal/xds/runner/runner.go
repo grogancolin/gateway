@@ -9,8 +9,9 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"math/rand"
 	"net"
-	"reflect"
+	"path/filepath"
 	"strconv"
 	"time"
 
@@ -32,6 +33,7 @@ import (
 	"github.com/envoyproxy/gateway/internal/crypto"
 	"github.com/envoyproxy/gateway/internal/envoygateway/config"
 	extension "github.com/envoyproxy/gateway/internal/extension/types"
+	"github.com/envoyproxy/gateway/internal/infrastructure/host"
 	"github.com/envoyproxy/gateway/internal/infrastructure/kubernetes/ratelimit"
 	"github.com/envoyproxy/gateway/internal/ir"
 	"github.com/envoyproxy/gateway/internal/message"
@@ -56,15 +58,18 @@ const (
 	// xDS server trusted CA certificate.
 	xdsTLSCaFilepath = "/certs/ca.crt"
 
-	// TODO: Make these path configurable.
-	// Default certificates path for envoy-gateway with Host infrastructure provider.
-	localTLSCertFilepath = "/tmp/envoy-gateway/certs/envoy-gateway/tls.crt"
-	localTLSKeyFilepath  = "/tmp/envoy-gateway/certs/envoy-gateway/tls.key"
-	localTLSCaFilepath   = "/tmp/envoy-gateway/certs/envoy-gateway/ca.crt"
 	// defaultKubernetesIssuer is the default issuer URL for Kubernetes.
 	// This is used for validating Service Account JWT tokens.
 	defaultKubernetesIssuer = "https://kubernetes.default.svc.cluster.local"
+
+	defaultMaxConnectionAgeGrace = 2 * time.Minute
 )
+
+var maxConnectionAgeValues = []time.Duration{
+	10 * time.Hour,
+	11 * time.Hour,
+	12 * time.Hour,
+}
 
 type Config struct {
 	config.Server
@@ -91,11 +96,55 @@ func (r *Runner) Name() string {
 	return string(egv1a1.LogComponentXdsRunner)
 }
 
+func (r *Runner) serverKeepaliveParams() (keepalive.ServerParameters, error) {
+	params := keepalive.ServerParameters{
+		MaxConnectionAge:      getRandomMaxConnectionAge(),
+		MaxConnectionAgeGrace: defaultMaxConnectionAgeGrace,
+	}
+
+	if r.EnvoyGateway == nil || r.EnvoyGateway.XDSServer == nil {
+		return params, nil
+	}
+
+	cfg := r.EnvoyGateway.XDSServer
+
+	if cfg.MaxConnectionAge != nil {
+		d, err := time.ParseDuration(string(*cfg.MaxConnectionAge))
+		if err != nil {
+			return keepalive.ServerParameters{}, fmt.Errorf("invalid xdsServer.maxConnectionAge: %w", err)
+		}
+		if d <= 0 {
+			return keepalive.ServerParameters{}, fmt.Errorf("xdsServer.maxConnectionAge must be greater than zero")
+		}
+		params.MaxConnectionAge = d
+	}
+
+	if cfg.MaxConnectionAgeGrace != nil {
+		d, err := time.ParseDuration(string(*cfg.MaxConnectionAgeGrace))
+		if err != nil {
+			return keepalive.ServerParameters{}, fmt.Errorf("invalid xdsServer.maxConnectionAgeGrace: %w", err)
+		}
+		if d <= 0 {
+			return keepalive.ServerParameters{}, fmt.Errorf("xdsServer.maxConnectionAgeGrace must be greater than zero")
+		}
+		params.MaxConnectionAgeGrace = d
+	}
+
+	return params, nil
+}
+
+// getRandomMaxConnectionAge picks a random maxConnectionAge value
+// to spread out envoy proxy connections over multiple envoy gateway replicas
+func getRandomMaxConnectionAge() time.Duration {
+	rnd := rand.New(rand.NewSource(time.Now().UnixNano())) //nolint:gosec
+	return maxConnectionAgeValues[rnd.Intn(len(maxConnectionAgeValues))]
+}
+
 // Close implements Runner interface.
 func (r *Runner) Close() error { return nil }
 
 // Start starts the xds-server runner
-func (r *Runner) Start(ctx context.Context) (err error) {
+func (r *Runner) Start(ctx context.Context) error {
 	r.Logger = r.Logger.WithName(r.Name()).WithValues("runner", r.Name())
 	r.cache = cache.NewSnapshotCache(true, r.Logger)
 
@@ -108,13 +157,24 @@ func (r *Runner) Start(ctx context.Context) (err error) {
 	}
 	r.Logger.Info("loaded TLS certificate and key")
 
-	grpcOpts := []grpc.ServerOption{
-		grpc.Creds(credentials.NewTLS(tlsConfig)),
-		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
-			MinTime:             15 * time.Second,
-			PermitWithoutStream: true,
-		}),
+	keepaliveParams, err := r.serverKeepaliveParams()
+	if err != nil {
+		return err
 	}
+	r.Logger.Info("configured gRPC keepalive", "maxConnectionAge", keepaliveParams.MaxConnectionAge, "maxConnectionAgeGrace", keepaliveParams.MaxConnectionAgeGrace)
+
+	enforcementPolicy := keepalive.EnforcementPolicy{
+		MinTime:             15 * time.Second,
+		PermitWithoutStream: true,
+	}
+
+	baseKeepaliveOptions := []grpc.ServerOption{
+		grpc.KeepaliveEnforcementPolicy(enforcementPolicy),
+		grpc.KeepaliveParams(keepaliveParams),
+	}
+
+	grpcOpts := append([]grpc.ServerOption{}, baseKeepaliveOptions...)
+	grpcOpts = append(grpcOpts, grpc.Creds(credentials.NewTLS(tlsConfig)))
 
 	// When GatewayNamespaceMode is enabled, we will use sTLS and Service Account JWT tokens to authenticate envoy proxy infra and xds server.
 	if r.EnvoyGateway.GatewayNamespaceMode() {
@@ -136,14 +196,11 @@ func (r *Runner) Start(ctx context.Context) (err error) {
 			return fmt.Errorf("failed to create TLS credentials: %w", err)
 		}
 
-		grpcOpts = []grpc.ServerOption{
-			grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
-				MinTime:             15 * time.Second,
-				PermitWithoutStream: true,
-			}),
+		grpcOpts = append([]grpc.ServerOption{}, baseKeepaliveOptions...)
+		grpcOpts = append(grpcOpts,
 			grpc.Creds(creds),
 			grpc.StreamInterceptor(jwtInterceptor.Stream()),
-		}
+		)
 	}
 
 	r.grpc = grpc.NewServer(grpcOpts...)
@@ -155,9 +212,9 @@ func (r *Runner) Start(ctx context.Context) (err error) {
 	// Do not call .Subscribe() inside Goroutine since it is supposed to be called from the same
 	// Goroutine where Close() is called.
 	sub := r.XdsIR.Subscribe(ctx)
-	go r.subscribeAndTranslate(sub)
+	go r.translateFromSubscription(sub)
 	r.Logger.Info("started")
-	return
+	return err
 }
 
 func (r *Runner) serveXdsServer(ctx context.Context) {
@@ -196,7 +253,7 @@ func registerServer(srv serverv3.Server, g *grpc.Server) {
 	runtimev3.RegisterRuntimeDiscoveryServiceServer(g, srv)
 }
 
-func (r *Runner) subscribeAndTranslate(sub <-chan watchable.Snapshot[string, *ir.Xds]) {
+func (r *Runner) translateFromSubscription(sub <-chan watchable.Snapshot[string, *ir.Xds]) {
 	// Subscribe to resources
 	message.HandleSubscription(message.Metadata{Runner: r.Name(), Message: message.XDSIRMessageName}, sub,
 		func(update message.Update[string, *ir.Xds], errChan chan error) {
@@ -253,31 +310,6 @@ func (r *Runner) subscribeAndTranslate(sub <-chan watchable.Snapshot[string, *ir
 					return
 				}
 
-				// Get all status keys from watchable and save them in the map statusesToDelete.
-				// Iterating through result.EnvoyPatchPolicyStatuses, any valid keys will be removed from statusesToDelete.
-				// Remaining keys will be deleted from watchable before we exit this function.
-				statusesToDelete := make(map[ktypes.NamespacedName]bool)
-				for key := range r.ProviderResources.EnvoyPatchPolicyStatuses.LoadAll() {
-					statusesToDelete[key] = true
-				}
-
-				// Publish EnvoyPatchPolicyStatus
-				for _, e := range result.EnvoyPatchPolicyStatuses {
-					key := ktypes.NamespacedName{
-						Name:      e.Name,
-						Namespace: e.Namespace,
-					}
-					// Skip updating status for policies with empty status
-					// They may have been skipped in this translation because
-					// their target is not found (not relevant)
-					if !(reflect.ValueOf(e.Status).IsZero()) {
-						r.ProviderResources.EnvoyPatchPolicyStatuses.Store(key, e.Status)
-					}
-					delete(statusesToDelete, key)
-				}
-				// Discard the EnvoyPatchPolicyStatuses to reduce memory footprint
-				result.EnvoyPatchPolicyStatuses = nil
-
 				// Update snapshot cache
 				if err == nil {
 					if result.XdsResources != nil {
@@ -296,6 +328,31 @@ func (r *Runner) subscribeAndTranslate(sub <-chan watchable.Snapshot[string, *ir
 					}
 				}
 
+				// Get all status keys from watchable and save them in the map statusesToDelete.
+				// Iterating through result.EnvoyPatchPolicyStatuses, any valid keys will be removed from statusesToDelete.
+				// Remaining keys will be deleted from watchable before we exit this function.
+				statusesToDelete := make(map[ktypes.NamespacedName]bool)
+				for key := range r.ProviderResources.EnvoyPatchPolicyStatuses.LoadAll() {
+					statusesToDelete[key] = true
+				}
+
+				// Publish EnvoyPatchPolicyStatus
+				for _, e := range result.EnvoyPatchPolicyStatuses {
+					key := ktypes.NamespacedName{
+						Name:      e.Name,
+						Namespace: e.Namespace,
+					}
+					// Skip updating status for policies with empty status
+					// They may have been skipped in this translation because
+					// their target is not found (not relevant)
+					if len(e.Status.Ancestors) > 0 {
+						r.ProviderResources.EnvoyPatchPolicyStatuses.Store(key, e.Status)
+					}
+					delete(statusesToDelete, key)
+				}
+				// Discard the EnvoyPatchPolicyStatuses to reduce memory footprint
+				result.EnvoyPatchPolicyStatuses = nil
+
 				// Delete all the deletable status keys
 				for key := range statusesToDelete {
 					r.ProviderResources.EnvoyPatchPolicyStatuses.Delete(key)
@@ -306,7 +363,7 @@ func (r *Runner) subscribeAndTranslate(sub <-chan watchable.Snapshot[string, *ir
 	r.Logger.Info("subscriber shutting down")
 }
 
-func (r *Runner) loadTLSConfig() (tlsConfig *tls.Config, err error) {
+func (r *Runner) loadTLSConfig() (*tls.Config, error) {
 	var certPath, keyPath, caPath string
 
 	// Use test-configurable paths if provided
@@ -322,17 +379,30 @@ func (r *Runner) loadTLSConfig() (tlsConfig *tls.Config, err error) {
 			keyPath = xdsTLSKeyFilepath
 			caPath = xdsTLSCaFilepath
 		case r.EnvoyGateway.Provider.IsRunningOnHost():
-			certPath = localTLSCertFilepath
-			keyPath = localTLSKeyFilepath
-			caPath = localTLSCaFilepath
+			// Get config
+			var hostCfg *egv1a1.EnvoyGatewayHostInfrastructureProvider
+			if p := r.EnvoyGateway.Provider; p != nil && p.Custom != nil &&
+				p.Custom.Infrastructure != nil && p.Custom.Infrastructure.Host != nil {
+				hostCfg = p.Custom.Infrastructure.Host
+			}
+
+			paths, err := host.GetPaths(hostCfg)
+			if err != nil {
+				return nil, fmt.Errorf("failed to determine paths: %w", err)
+			}
+
+			certDir := paths.CertDir("envoy-gateway")
+			certPath = filepath.Join(certDir, "tls.crt")
+			keyPath = filepath.Join(certDir, "tls.key")
+			caPath = filepath.Join(certDir, "ca.crt")
 		default:
 			return nil, fmt.Errorf("no valid tls certificates")
 		}
 	}
 
-	tlsConfig, err = crypto.LoadTLSConfig(certPath, keyPath, caPath)
+	tlsConfig, err := crypto.LoadTLSConfig(certPath, keyPath, caPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create tls config: %w", err)
 	}
-	return
+	return tlsConfig, err
 }

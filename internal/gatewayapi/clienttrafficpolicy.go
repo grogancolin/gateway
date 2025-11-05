@@ -18,7 +18,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/utils/ptr"
-	gwapiv1a2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
+	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	egv1a1 "github.com/envoyproxy/gateway/api/v1alpha1"
 	"github.com/envoyproxy/gateway/internal/gatewayapi/resource"
@@ -32,7 +32,7 @@ const (
 	AllSections = "/"
 )
 
-func hasSectionName(target *gwapiv1a2.LocalPolicyTargetReferenceWithSectionName) bool {
+func hasSectionName(target *gwapiv1.LocalPolicyTargetReferenceWithSectionName) bool {
 	return target.SectionName != nil
 }
 
@@ -72,26 +72,24 @@ func (t *Translator) ProcessClientTrafficPolicies(
 			if hasSectionName(&currTarget) {
 				policy, found := handledPolicies[policyName]
 				if !found {
-					policy = currPolicy.DeepCopy()
+					policy = currPolicy
 					handledPolicies[policyName] = policy
 					res = append(res, policy)
 				}
 
-				gateway, resolveErr := resolveCTPolicyTargetRef(policy, &currTarget, gatewayMap)
+				gateway, resolveErr := resolveClientTrafficPolicyTargetRef(policy, &currTarget, gatewayMap)
 
 				// Negative statuses have already been assigned so its safe to skip
 				if gateway == nil {
 					continue
 				}
 				key := utils.NamespacedName(gateway)
-				ancestorRefs := []gwapiv1a2.ParentReference{
-					getAncestorRefForPolicy(key, currTarget.SectionName),
-				}
+				ancestorRef := getAncestorRefForPolicy(key, currTarget.SectionName)
 
 				// Set conditions for resolve error, then skip current gateway
 				if resolveErr != nil {
-					status.SetResolveErrorForPolicyAncestors(&policy.Status,
-						ancestorRefs,
+					status.SetResolveErrorForPolicyAncestor(&policy.Status,
+						&ancestorRef,
 						t.GatewayControllerName,
 						policy.Generation,
 						resolveErr,
@@ -108,12 +106,12 @@ func (t *Translator) ProcessClientTrafficPolicies(
 						string(currTarget.Name))
 
 					resolveErr = &status.PolicyResolveError{
-						Reason:  gwapiv1a2.PolicyReasonConflicted,
+						Reason:  gwapiv1.PolicyReasonConflicted,
 						Message: message,
 					}
 
-					status.SetResolveErrorForPolicyAncestors(&policy.Status,
-						ancestorRefs,
+					status.SetResolveErrorForPolicyAncestor(&policy.Status,
+						&ancestorRef,
 						t.GatewayControllerName,
 						policy.Generation,
 						resolveErr,
@@ -146,8 +144,8 @@ func (t *Translator) ProcessClientTrafficPolicies(
 
 				// Set conditions for translation error if it got any
 				if err != nil {
-					status.SetTranslationErrorForPolicyAncestors(&policy.Status,
-						ancestorRefs,
+					status.SetTranslationErrorForPolicyAncestor(&policy.Status,
+						&ancestorRef,
 						t.GatewayControllerName,
 						policy.Generation,
 						status.Error2ConditionMsg(err),
@@ -155,7 +153,7 @@ func (t *Translator) ProcessClientTrafficPolicies(
 				}
 
 				// Set Accepted condition if it is unset
-				status.SetAcceptedForPolicyAncestors(&policy.Status, ancestorRefs, t.GatewayControllerName, policy.Generation)
+				status.SetAcceptedForPolicyAncestor(&policy.Status, &ancestorRef, t.GatewayControllerName, policy.Generation)
 			}
 		}
 	}
@@ -163,18 +161,18 @@ func (t *Translator) ProcessClientTrafficPolicies(
 	// Policy with no section set (targeting all sections)
 	for _, currPolicy := range clientTrafficPolicies {
 		policyName := utils.NamespacedName(currPolicy)
-		targetRefs := getPolicyTargetRefs(currPolicy.Spec.PolicyTargetReferences, gateways)
+		targetRefs := getPolicyTargetRefs(currPolicy.Spec.PolicyTargetReferences, gateways, currPolicy.Namespace)
 		for _, currTarget := range targetRefs {
 			if !hasSectionName(&currTarget) {
 
 				policy, found := handledPolicies[policyName]
 				if !found {
-					policy = currPolicy.DeepCopy()
+					policy = currPolicy
 					res = append(res, policy)
 					handledPolicies[policyName] = policy
 				}
 
-				gateway, resolveErr := resolveCTPolicyTargetRef(policy, &currTarget, gatewayMap)
+				gateway, resolveErr := resolveClientTrafficPolicyTargetRef(policy, &currTarget, gatewayMap)
 
 				// Negative statuses have already been assigned so its safe to skip
 				if gateway == nil {
@@ -182,14 +180,12 @@ func (t *Translator) ProcessClientTrafficPolicies(
 				}
 
 				key := utils.NamespacedName(gateway)
-				ancestorRefs := []gwapiv1a2.ParentReference{
-					getAncestorRefForPolicy(key, nil),
-				}
+				ancestorRef := getAncestorRefForPolicy(key, nil)
 
 				// Set conditions for resolve error, then skip current gateway
 				if resolveErr != nil {
-					status.SetResolveErrorForPolicyAncestors(&policy.Status,
-						ancestorRefs,
+					status.SetResolveErrorForPolicyAncestor(&policy.Status,
+						&ancestorRef,
 						t.GatewayControllerName,
 						policy.Generation,
 						resolveErr,
@@ -205,12 +201,12 @@ func (t *Translator) ProcessClientTrafficPolicies(
 						string(currTarget.Name))
 
 					resolveErr = &status.PolicyResolveError{
-						Reason:  gwapiv1a2.PolicyReasonConflicted,
+						Reason:  gwapiv1.PolicyReasonConflicted,
 						Message: message,
 					}
 
-					status.SetResolveErrorForPolicyAncestors(&policy.Status,
-						ancestorRefs,
+					status.SetResolveErrorForPolicyAncestor(&policy.Status,
+						&ancestorRef,
 						t.GatewayControllerName,
 						policy.Generation,
 						resolveErr,
@@ -226,8 +222,8 @@ func (t *Translator) ProcessClientTrafficPolicies(
 					sort.Strings(sections)
 					message := fmt.Sprintf("There are existing ClientTrafficPolicies that are overriding these sections %v", sections)
 
-					status.SetConditionForPolicyAncestors(&policy.Status,
-						ancestorRefs,
+					status.SetConditionForPolicyAncestor(&policy.Status,
+						&ancestorRef,
 						t.GatewayControllerName,
 						egv1a1.PolicyConditionOverridden,
 						metav1.ConditionTrue,
@@ -264,8 +260,8 @@ func (t *Translator) ProcessClientTrafficPolicies(
 
 				// Set conditions for translation error if it got any
 				if errs != nil {
-					status.SetTranslationErrorForPolicyAncestors(&policy.Status,
-						ancestorRefs,
+					status.SetTranslationErrorForPolicyAncestor(&policy.Status,
+						&ancestorRef,
 						t.GatewayControllerName,
 						policy.Generation,
 						status.Error2ConditionMsg(errs),
@@ -273,7 +269,7 @@ func (t *Translator) ProcessClientTrafficPolicies(
 				}
 
 				// Set Accepted condition if it is unset
-				status.SetAcceptedForPolicyAncestors(&policy.Status, ancestorRefs, t.GatewayControllerName, policy.Generation)
+				status.SetAcceptedForPolicyAncestor(&policy.Status, &ancestorRef, t.GatewayControllerName, policy.Generation)
 			}
 		}
 	}
@@ -287,9 +283,9 @@ func (t *Translator) ProcessClientTrafficPolicies(
 	return res
 }
 
-func resolveCTPolicyTargetRef(
+func resolveClientTrafficPolicyTargetRef(
 	policy *egv1a1.ClientTrafficPolicy,
-	targetRef *gwapiv1a2.LocalPolicyTargetReferenceWithSectionName,
+	targetRef *gwapiv1.LocalPolicyTargetReferenceWithSectionName,
 	gateways map[types.NamespacedName]*policyGatewayTargetContext,
 ) (*GatewayContext, *status.PolicyResolveError) {
 	// Check if the gateway exists
@@ -447,15 +443,17 @@ func (t *Translator) translateClientTrafficPolicyForListener(policy *egv1a1.Clie
 		translatePathSettings(policy.Spec.Path, httpIR)
 
 		// Translate HTTP1 Settings
-		if err = translateHTTP1Settings(policy.Spec.HTTP1, httpIR); err != nil {
+		if err = translateHTTP1Settings(policy.Spec.HTTP1, connection, httpIR); err != nil {
 			err = perr.WithMessage(err, "HTTP1")
 			errs = errors.Join(errs, err)
 		}
 
 		// Translate HTTP2 Settings
-		if err = translateHTTP2Settings(policy.Spec.HTTP2, httpIR); err != nil {
+		if h2, err := buildIRHTTP2Settings(policy.Spec.HTTP2); err != nil {
 			err = perr.WithMessage(err, "HTTP2")
 			errs = errors.Join(errs, err)
+		} else {
+			httpIR.HTTP2 = h2
 		}
 
 		// enable http3 if set and TLS is enabled
@@ -486,11 +484,20 @@ func (t *Translator) translateClientTrafficPolicyForListener(policy *egv1a1.Clie
 
 		// Early return if got any errors
 		if errs != nil {
+			routesWithDirectResponse := sets.New[string]()
 			for _, route := range httpIR.Routes {
 				// Return a 500 direct response
 				route.DirectResponse = &ir.CustomResponse{
 					StatusCode: ptr.To(uint32(500)),
 				}
+				routesWithDirectResponse.Insert(route.Name)
+			}
+			if len(httpIR.Routes) > 0 {
+				t.Logger.Info("setting 500 direct response in routes due to errors in ClientTrafficPolicy",
+					"policy", utils.NamespacedName(policy),
+					"routes", sets.List(routesWithDirectResponse),
+					"error", errs,
+				)
 			}
 			return errs
 		}
@@ -643,7 +650,7 @@ func translateListenerHeaderSettings(headerSettings *egv1a1.HeaderSettings, http
 	if headerSettings.RequestID != nil {
 		httpIR.Headers.RequestID = (*ir.RequestIDAction)(headerSettings.RequestID)
 	} else if headerSettings.PreserveXRequestID != nil && *headerSettings.PreserveXRequestID {
-		httpIR.Headers.RequestID = ptr.To(ir.RequestIDActionPreserve)
+		httpIR.Headers.RequestID = ptr.To(ir.RequestIDActionPreserveOrGenerate)
 	}
 
 	if headerSettings.XForwardedClientCert != nil {
@@ -657,18 +664,30 @@ func translateListenerHeaderSettings(headerSettings *egv1a1.HeaderSettings, http
 		}
 	}
 
+	var errs error
+
 	if headerSettings.EarlyRequestHeaders != nil {
-		headersToAdd, headersToRemove, err := translateEarlyRequestHeaders(headerSettings.EarlyRequestHeaders)
+		headersToAdd, headersToRemove, err := translateHeaderModifier(headerSettings.EarlyRequestHeaders, "EarlyRequestHeaders")
 		if err != nil {
-			return err
+			errs = errors.Join(errs, err)
 		}
 		httpIR.Headers.EarlyAddRequestHeaders = headersToAdd
 		httpIR.Headers.EarlyRemoveRequestHeaders = headersToRemove
 	}
-	return nil
+
+	if headerSettings.LateResponseHeaders != nil {
+		headersToAdd, headersToRemove, err := translateHeaderModifier(headerSettings.LateResponseHeaders, "LateResponseHeaders")
+		if err != nil {
+			errs = errors.Join(errs, err)
+		}
+		httpIR.Headers.LateAddResponseHeaders = headersToAdd
+		httpIR.Headers.LateRemoveResponseHeaders = headersToRemove
+	}
+
+	return errs
 }
 
-func translateHTTP1Settings(http1Settings *egv1a1.HTTP1Settings, httpIR *ir.HTTPListener) error {
+func translateHTTP1Settings(http1Settings *egv1a1.HTTP1Settings, connection *ir.ClientConnection, httpIR *ir.HTTPListener) error {
 	if http1Settings == nil {
 		return nil
 	}
@@ -676,6 +695,14 @@ func translateHTTP1Settings(http1Settings *egv1a1.HTTP1Settings, httpIR *ir.HTTP
 		EnableTrailers:     ptr.Deref(http1Settings.EnableTrailers, false),
 		PreserveHeaderCase: ptr.Deref(http1Settings.PreserveHeaderCase, false),
 	}
+	if connection != nil {
+		if connection.ConnectionLimit != nil {
+			if connection.ConnectionLimit.MaxConnectionDuration != nil {
+				httpIR.HTTP1.DisableSafeMaxConnectionDuration = ptr.Deref(http1Settings.DisableSafeMaxConnectionDuration, false)
+			}
+		}
+	}
+
 	if http1Settings.HTTP10 != nil {
 		var defaultHost *string
 		if ptr.Deref(http1Settings.HTTP10.UseDefaultHost, false) {
@@ -718,52 +745,6 @@ func translateHTTP1Settings(http1Settings *egv1a1.HTTP1Settings, httpIR *ir.HTTP
 		}
 	}
 	return nil
-}
-
-func translateHTTP2Settings(http2Settings *egv1a1.HTTP2Settings, httpIR *ir.HTTPListener) error {
-	if http2Settings == nil {
-		return nil
-	}
-
-	var (
-		http2 = &ir.HTTP2Settings{}
-		errs  error
-	)
-
-	if http2Settings.InitialStreamWindowSize != nil {
-		initialStreamWindowSize, ok := http2Settings.InitialStreamWindowSize.AsInt64()
-		switch {
-		case !ok:
-			errs = errors.Join(errs, fmt.Errorf("invalid InitialStreamWindowSize value %s", http2Settings.InitialStreamWindowSize.String()))
-		case initialStreamWindowSize < MinHTTP2InitialStreamWindowSize || initialStreamWindowSize > MaxHTTP2InitialStreamWindowSize:
-			errs = errors.Join(errs, fmt.Errorf("InitialStreamWindowSize value %s is out of range, must be between %d and %d",
-				http2Settings.InitialStreamWindowSize.String(),
-				MinHTTP2InitialStreamWindowSize,
-				MaxHTTP2InitialStreamWindowSize))
-		default:
-			http2.InitialStreamWindowSize = ptr.To(uint32(initialStreamWindowSize))
-		}
-	}
-
-	if http2Settings.InitialConnectionWindowSize != nil {
-		initialConnectionWindowSize, ok := http2Settings.InitialConnectionWindowSize.AsInt64()
-		switch {
-		case !ok:
-			errs = errors.Join(errs, fmt.Errorf("invalid InitialConnectionWindowSize value %s", http2Settings.InitialConnectionWindowSize.String()))
-		case initialConnectionWindowSize < MinHTTP2InitialConnectionWindowSize || initialConnectionWindowSize > MaxHTTP2InitialConnectionWindowSize:
-			errs = errors.Join(errs, fmt.Errorf("InitialConnectionWindowSize value %s is out of range, must be between %d and %d",
-				http2Settings.InitialConnectionWindowSize.String(),
-				MinHTTP2InitialConnectionWindowSize,
-				MaxHTTP2InitialConnectionWindowSize))
-		default:
-			http2.InitialConnectionWindowSize = ptr.To(uint32(initialConnectionWindowSize))
-		}
-	}
-
-	http2.MaxConcurrentStreams = http2Settings.MaxConcurrentStreams
-
-	httpIR.HTTP2 = http2
-	return errs
 }
 
 func translateHealthCheckSettings(healthCheckSettings *egv1a1.HealthCheckSettings, httpIR *ir.HTTPListener) {
@@ -832,55 +813,42 @@ func (t *Translator) buildListenerTLSParameters(policy *egv1a1.ClientTrafficPoli
 		}
 
 		for _, caCertRef := range tlsParams.ClientValidation.CACertificateRefs {
-			caCertRefKind := string(ptr.Deref(caCertRef.Kind, resource.KindSecret))
-			var caCertBytes []byte
-			switch caCertRefKind {
-			case resource.KindSecret:
-				secret, err := t.validateSecretRef(false, from, caCertRef, resources)
-				if err != nil {
-					return irTLSConfig, err
-				}
-
-				secretCertBytes, ok := getCaCertFromSecret(secret)
-				if !ok || len(secretCertBytes) == 0 {
-					return irTLSConfig, fmt.Errorf(
-						"caCertificateRef secret [%s] not found", caCertRef.Name)
-				}
-				caCertBytes = secretCertBytes
-			case resource.KindConfigMap:
-				configMap, err := t.validateConfigMapRef(false, from, caCertRef, resources)
-				if err != nil {
-					return irTLSConfig, err
-				}
-
-				configMapData, ok := getCaCertFromConfigMap(configMap)
-				if !ok || len(configMapData) == 0 {
-					return irTLSConfig, fmt.Errorf(
-						"caCertificateRef configmap [%s] not found", caCertRef.Name)
-				}
-				caCertBytes = []byte(configMapData)
-			case resource.KindClusterTrustBundle:
-				trustBundle := resources.GetClusterTrustBundle(string(caCertRef.Name))
-				if trustBundle == nil {
-					return irTLSConfig, fmt.Errorf(
-						"caCertificateRef ClusterTrustBundle [%s] not found", caCertRef.Name)
-				}
-				caCertBytes = []byte(trustBundle.Spec.TrustBundle)
-			default:
-				return irTLSConfig, fmt.Errorf("unsupported caCertificateRef kind:%s", caCertRefKind)
+			caCertBytes, err := t.validateAndGetDataAtKeyInRef(caCertRef, caCertKey, resources, from)
+			if err != nil {
+				return irTLSConfig, fmt.Errorf("failed to get certificate from ref: %w", err)
 			}
-
-			if err := validateCertificate(caCertBytes); err != nil {
-				return irTLSConfig, fmt.Errorf(
-					"invalid certificate in %s %s: %w", caCertRefKind, caCertRef.Name, err)
+			if err := validateCertificates(caCertBytes); err != nil {
+				return irTLSConfig, fmt.Errorf("invalid certificate in %s: %w", caCertRef.Name, err)
 			}
 			irCACert.Certificate = append(irCACert.Certificate, caCertBytes...)
 		}
-
 		if len(irCACert.Certificate) > 0 {
 			irTLSConfig.CACertificate = irCACert
 			irTLSConfig.RequireClientCertificate = !tlsParams.ClientValidation.Optional
 			setTLSClientValidationContext(tlsParams.ClientValidation, irTLSConfig)
+		}
+
+		irCrl := &ir.TLSCrl{
+			Name: irTLSCrlName(policy.Namespace, policy.Name),
+		}
+
+		if tlsParams.ClientValidation.Crl != nil {
+			for _, crlRef := range tlsParams.ClientValidation.Crl.Refs {
+				crlBytes, err := t.validateAndGetDataAtKeyInRef(crlRef, crlKey, resources, from)
+				if err != nil {
+					return irTLSConfig, fmt.Errorf("failed to get crl from ref: %w", err)
+				}
+				if err := validateCrl(crlBytes); err != nil {
+					return irTLSConfig, fmt.Errorf("invalid crl in %s: %w", crlRef.Name, err)
+				}
+				irCrl.Data = append(irCrl.Data, crlBytes...)
+			}
+			if len(irCrl.Data) > 0 {
+				irTLSConfig.Crl = irCrl
+				if tlsParams.ClientValidation.Crl.OnlyVerifyLeafCertificate != nil {
+					irCrl.OnlyVerifyLeafCertificate = *tlsParams.ClientValidation.Crl.OnlyVerifyLeafCertificate
+				}
+			}
 		}
 	}
 
@@ -894,6 +862,43 @@ func (t *Translator) buildListenerTLSParameters(policy *egv1a1.ClientTrafficPoli
 	}
 
 	return irTLSConfig, nil
+}
+
+// validateAndGetDataAtKeyInRef validates the secret object reference and gets the data at the key in the secret or configmap
+func (t *Translator) validateAndGetDataAtKeyInRef(ref gwapiv1.SecretObjectReference, key string, resources *resource.Resources, from crossNamespaceFrom) ([]byte, error) {
+	refKind := string(ptr.Deref(ref.Kind, resource.KindSecret))
+	switch refKind {
+	case resource.KindSecret:
+		secret, err := t.validateSecretRef(false, from, ref, resources)
+		if err != nil {
+			return nil, err
+		}
+
+		secretCertBytes, ok := getOrFirstFromData(secret.Data, key)
+		if !ok || len(secretCertBytes) == 0 {
+			return nil, fmt.Errorf("ref secret [%s] has no key %s and more than one entry", ref.Name, key)
+		}
+		return secretCertBytes, nil
+	case resource.KindConfigMap:
+		configMap, err := t.validateConfigMapRef(false, from, ref, resources)
+		if err != nil {
+			return nil, err
+		}
+
+		configMapData, ok := getOrFirstFromData(configMap.Data, key)
+		if !ok || len(configMapData) == 0 {
+			return nil, fmt.Errorf("ref configmap [%s] has no key %s and more than one entry", ref.Name, key)
+		}
+		return []byte(configMapData), nil
+	case resource.KindClusterTrustBundle:
+		trustBundle := resources.GetClusterTrustBundle(string(ref.Name))
+		if trustBundle == nil {
+			return nil, fmt.Errorf("ref ClusterTrustBundle [%s] not found", ref.Name)
+		}
+		return []byte(trustBundle.Spec.TrustBundle), nil
+	default:
+		return nil, fmt.Errorf("unsupported ref kind:%s", refKind)
+	}
 }
 
 func setTLSClientValidationContext(tlsClientValidation *egv1a1.ClientValidationContext, irTLSConfig *ir.TLSConfig) {
@@ -942,6 +947,26 @@ func buildConnection(connection *egv1a1.ClientConnection) (*ir.ClientConnection,
 			irConnectionLimit.CloseDelay = ir.MetaV1DurationPtr(d)
 		}
 
+		if connection.ConnectionLimit.MaxConnectionDuration != nil {
+			d, err := time.ParseDuration(string(*connection.ConnectionLimit.MaxConnectionDuration))
+			if err != nil {
+				return nil, fmt.Errorf("invalid MaxConnectionDuration value %s", *connection.ConnectionLimit.MaxConnectionDuration)
+			}
+			irConnectionLimit.MaxConnectionDuration = ptr.To(metav1.Duration{Duration: d})
+		}
+
+		if connection.ConnectionLimit.MaxRequestsPerConnection != nil {
+			irConnectionLimit.MaxRequestsPerConnection = connection.ConnectionLimit.MaxRequestsPerConnection
+		}
+
+		if connection.ConnectionLimit.MaxStreamDuration != nil {
+			d, err := time.ParseDuration(string(*connection.ConnectionLimit.MaxStreamDuration))
+			if err != nil {
+				return nil, fmt.Errorf("invalid MaxStreamDuration value %s", *connection.ConnectionLimit.MaxStreamDuration)
+			}
+			irConnectionLimit.MaxStreamDuration = ptr.To(metav1.Duration{Duration: d})
+		}
+
 		irConnection.ConnectionLimit = irConnectionLimit
 	}
 
@@ -964,7 +989,7 @@ func buildConnection(connection *egv1a1.ClientConnection) (*ir.ClientConnection,
 	return irConnection, nil
 }
 
-func translateEarlyRequestHeaders(headerModifier *egv1a1.HTTPHeaderFilter) ([]ir.AddHeader, []string, error) {
+func translateHeaderModifier(headerModifier *egv1a1.HTTPHeaderFilter, modType string) ([]ir.AddHeader, []string, error) {
 	// Make sure the header modifier config actually exists
 	if headerModifier == nil {
 		return nil, nil, nil
@@ -983,18 +1008,18 @@ func translateEarlyRequestHeaders(headerModifier *egv1a1.HTTPHeaderFilter) ([]ir
 		for _, addHeader := range headersToAdd {
 			emptyFilterConfig = false
 			if addHeader.Name == "" {
-				errs = errors.Join(errs, fmt.Errorf("EarlyRequestHeaders cannot add a header with an empty name"))
+				errs = errors.Join(errs, fmt.Errorf("%s cannot add a header with an empty name", modType))
 				// try to process the rest of the headers and produce a valid config.
 				continue
 			}
 			// Per Gateway API specification on HTTPHeaderName, : and / are invalid characters in header names
 			if strings.ContainsAny(string(addHeader.Name), "/:") {
-				errs = errors.Join(errs, fmt.Errorf("EarlyRequestHeaders cannot add a header with a '/' or ':' character in them. Header: '%q'", string(addHeader.Name)))
+				errs = errors.Join(errs, fmt.Errorf("%s cannot add a header with a '/' or ':' character in them. Header: '%q'", modType, string(addHeader.Name)))
 				continue
 			}
 			// Gateway API specification allows only valid value as defined by RFC 7230
 			if !HeaderValueRegexp.MatchString(addHeader.Value) {
-				errs = errors.Join(errs, fmt.Errorf("EarlyRequestHeaders cannot add a header with an invalid value. Header: '%q'", string(addHeader.Name)))
+				errs = errors.Join(errs, fmt.Errorf("%s cannot add a header with an invalid value. Header: '%q'", modType, string(addHeader.Name)))
 				continue
 			}
 			// Check if the header is a duplicate
@@ -1029,17 +1054,17 @@ func translateEarlyRequestHeaders(headerModifier *egv1a1.HTTPHeaderFilter) ([]ir
 		for _, setHeader := range headersToSet {
 
 			if setHeader.Name == "" {
-				errs = errors.Join(errs, fmt.Errorf("EarlyRequestHeaders cannot set a header with an empty name"))
+				errs = errors.Join(errs, fmt.Errorf("%s cannot set a header with an empty name", modType))
 				continue
 			}
 			// Per Gateway API specification on HTTPHeaderName, : and / are invalid characters in header names
 			if strings.ContainsAny(string(setHeader.Name), "/:") {
-				errs = errors.Join(errs, fmt.Errorf("EarlyRequestHeaders cannot set a header with a '/' or ':' character in them. Header: '%q'", string(setHeader.Name)))
+				errs = errors.Join(errs, fmt.Errorf("%s cannot set a header with a '/' or ':' character in them. Header: '%q'", modType, string(setHeader.Name)))
 				continue
 			}
 			// Gateway API specification allows only valid value as defined by RFC 7230
 			if !HeaderValueRegexp.MatchString(setHeader.Value) {
-				errs = errors.Join(errs, fmt.Errorf("EarlyRequestHeaders cannot set a header with an invalid value. Header: '%q'", string(setHeader.Name)))
+				errs = errors.Join(errs, fmt.Errorf("%s cannot set a header with an invalid value. Header: '%q'", modType, string(setHeader.Name)))
 				continue
 			}
 
@@ -1074,7 +1099,7 @@ func translateEarlyRequestHeaders(headerModifier *egv1a1.HTTPHeaderFilter) ([]ir
 		}
 		for _, removedHeader := range headersToRemove {
 			if removedHeader == "" {
-				errs = errors.Join(errs, fmt.Errorf("EarlyRequestHeaders cannot remove a header with an empty name"))
+				errs = errors.Join(errs, fmt.Errorf("%s cannot remove a header with an empty name", modType))
 				continue
 			}
 
@@ -1095,7 +1120,7 @@ func translateEarlyRequestHeaders(headerModifier *egv1a1.HTTPHeaderFilter) ([]ir
 
 	// Update the status if the filter failed to configure any valid headers to add/remove
 	if len(AddRequestHeaders) == 0 && len(RemoveRequestHeaders) == 0 && !emptyFilterConfig {
-		errs = errors.Join(errs, fmt.Errorf("EarlyRequestHeaders did not provide valid configuration to add/set/remove any headers"))
+		errs = errors.Join(errs, fmt.Errorf("%s did not provide valid configuration to add/set/remove any headers", modType))
 	}
 
 	return AddRequestHeaders, RemoveRequestHeaders, errs

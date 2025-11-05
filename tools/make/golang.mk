@@ -81,6 +81,16 @@ go.test.cel: manifests # Run the CEL validation tests
          go test ./test/cel-validation --tags celvalidation -race || exit 1; \
     done
 
+.PHONY: go.test.benchmark
+go.test.benchmark: ## Run benchmark tests for translation performance
+	@$(LOG_TARGET)
+	go test -timeout=15m -run='^$$' -bench=. -benchmem -benchtime=1x -count=6 ./test/gobench
+
+.PHONY: go.test.clean
+go.test.clean: # Clean go test cache
+	@$(LOG_TARGET)
+	go clean -testcache
+
 .PHONY: go.clean
 go.clean: ## Clean the building output files
 	@$(LOG_TARGET)
@@ -134,8 +144,12 @@ format: go.mod.lint
 
 .PHONY: clean
 clean: ## Remove all files that are created during builds.
-clean: go.clean
+clean: go.clean go.test.clean
 
 .PHONY: testdata
 testdata: ## Override the testdata with new configurations.
 testdata: go.testdata.complete
+
+.PHONY: go-benchmark
+go-benchmark: ## Run benchmark tests for translation performance.
+go-benchmark: go.test.benchmark

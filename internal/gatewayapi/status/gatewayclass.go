@@ -35,13 +35,12 @@ const (
 
 // SetGatewayClassAccepted inserts or updates the Accepted condition
 // for the provided GatewayClass.
-func SetGatewayClassAccepted(gc *gwapiv1.GatewayClass, accepted bool, reason, msg string) *gwapiv1.GatewayClass {
+func SetGatewayClassAccepted(gc *gwapiv1.GatewayClass, accepted bool, reason, msg string) {
 	gc.Status.Conditions = MergeConditions(gc.Status.Conditions, computeGatewayClassAcceptedCondition(gc, accepted, reason, msg))
 	// Disable SupportedFeatures until the field moves from experimental to stable to avoid
 	// status failures due to changes in the datatype. This can occur because we cannot control
 	// how a CRD is installed in the cluster
 	// gc.Status.SupportedFeatures = GatewaySupportedFeatures
-	return gc
 }
 
 // computeGatewayClassAcceptedCondition computes the GatewayClass Accepted status condition.
@@ -71,7 +70,7 @@ func computeGatewayClassAcceptedCondition(gatewayClass *gwapiv1.GatewayClass,
 	}
 }
 
-func getSupportedFeatures(gatewaySuite suite.ConformanceOptions, skippedTests []suite.ConformanceTest) []gwapiv1.SupportedFeature {
+func getSupportedFeatures(gatewaySuite *suite.ConformanceOptions, skippedTests []suite.ConformanceTest) []gwapiv1.SupportedFeature {
 	supportedFeatures := gatewaySuite.SupportedFeatures.Clone()
 	unsupportedFeatures := getUnsupportedFeatures(gatewaySuite, skippedTests)
 	supportedFeatures.Delete(unsupportedFeatures...)
@@ -83,18 +82,18 @@ func getSupportedFeatures(gatewaySuite suite.ConformanceOptions, skippedTests []
 		})
 	}
 
-	var featureList []gwapiv1.SupportedFeature
+	featureList := make([]gwapiv1.SupportedFeature, 0, len(ret))
 	for feature := range ret {
 		featureList = append(featureList, feature)
 	}
 	return featureList
 }
 
-func getUnsupportedFeatures(gatewaySuite suite.ConformanceOptions, skippedTests []suite.ConformanceTest) []features.FeatureName {
+func getUnsupportedFeatures(gatewaySuite *suite.ConformanceOptions, skippedTests []suite.ConformanceTest) []features.FeatureName {
 	unsupportedFeatures := gatewaySuite.ExemptFeatures.UnsortedList()
 
 	for _, skippedTest := range skippedTests {
-		switch conformance.GetTestSupportLevel(skippedTest) {
+		switch conformance.GetTestSupportLevel(&skippedTest) {
 		case conformance.Core:
 			unsupportedFeatures = append(unsupportedFeatures, skippedTest.Features...)
 		case conformance.Extended:

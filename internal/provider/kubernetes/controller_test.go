@@ -303,7 +303,7 @@ func TestProcessBackendRefsWithCustomBackends(t *testing.T) {
 
 			// Create resource mappings
 			resourceMappings := &resourceMappings{
-				allAssociatedBackendRefs:                sets.New[gwapiv1.BackendObjectReference](),
+				allAssociatedBackendRefs:                make(map[utils.NamespacedNameWithGroupKind]gwapiv1.BackendObjectReference),
 				allAssociatedNamespaces:                 sets.New[string](),
 				allAssociatedBackendRefExtensionFilters: sets.New[utils.NamespacedNameWithGroupKind](),
 				extensionRefFilters:                     tc.existingExtFilters,
@@ -311,7 +311,7 @@ func TestProcessBackendRefsWithCustomBackends(t *testing.T) {
 
 			// Add backend refs to the mapping
 			for _, backendRef := range tc.backendRefs {
-				resourceMappings.allAssociatedBackendRefs.Insert(backendRef)
+				resourceMappings.insertBackendRef(backendRef)
 			}
 
 			// Create empty resource tree
@@ -1249,36 +1249,47 @@ func TestProcessSecurityPolicyObjectRefs(t *testing.T) {
 }
 
 func TestProcessServiceClusterForGatewayClass(t *testing.T) {
+	gcName := "merged-gc"
+	nsName := "envoy-gateway-system"
 	testCases := []struct {
 		name            string
 		gatewayClass    *gwapiv1.GatewayClass
 		envoyProxy      *egv1a1.EnvoyProxy
 		expectedSvcName string
+		serviceCluster  []client.Object
 	}{
 		{
 			name: "when merged gateways and no hardcoded svc name is used",
 			gatewayClass: &gwapiv1.GatewayClass{
 				ObjectMeta: metav1.ObjectMeta{
-					Name: "merged-gc",
+					Name: gcName,
 				},
 			},
 			envoyProxy:      nil,
-			expectedSvcName: proxy.ExpectedResourceHashedName("merged-gc"),
+			expectedSvcName: proxy.ExpectedResourceHashedName(gcName),
+			serviceCluster: []client.Object{
+				&corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      proxy.ExpectedResourceHashedName(gcName),
+						Namespace: nsName,
+					},
+				},
+			},
 		},
 		{
 			name: "when merged gateways and a hardcoded svc name is used",
 			gatewayClass: &gwapiv1.GatewayClass{
 				ObjectMeta: metav1.ObjectMeta{
-					Name: "merged-gc",
+					Name: gcName,
 				},
 			},
 			envoyProxy: &egv1a1.EnvoyProxy{
 				ObjectMeta: metav1.ObjectMeta{
-					Name: "merged-gc",
+					Name: gcName,
 				},
 				Spec: egv1a1.EnvoyProxySpec{
 					Provider: &egv1a1.EnvoyProxyProvider{
-						Type: egv1a1.ProviderTypeKubernetes,
+						Type: egv1a1.EnvoyProxyProviderTypeKubernetes,
 						Kubernetes: &egv1a1.EnvoyProxyKubernetesProvider{
 							EnvoyService: &egv1a1.KubernetesServiceSpec{
 								Name: ptr.To("merged-gc-svc"),
@@ -1288,6 +1299,25 @@ func TestProcessServiceClusterForGatewayClass(t *testing.T) {
 				},
 			},
 			expectedSvcName: "merged-gc-svc",
+			serviceCluster: []client.Object{
+				&corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "merged-gc-svc",
+						Namespace: nsName,
+					},
+				},
+			},
+		},
+		{
+			name: "non-existent proxy service",
+			gatewayClass: &gwapiv1.GatewayClass{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: gcName,
+				},
+			},
+			envoyProxy:      nil,
+			expectedSvcName: proxy.ExpectedResourceHashedName(gcName),
+			serviceCluster:  nil,
 		},
 	}
 
@@ -1299,15 +1329,26 @@ func TestProcessServiceClusterForGatewayClass(t *testing.T) {
 			resourceMap := newResourceMapping()
 
 			r := newGatewayAPIReconciler(logger)
+			r.client = fakeclient.NewClientBuilder().
+				WithScheme(envoygateway.GetScheme()).
+				WithObjects(tc.serviceCluster...).
+				Build()
 			r.namespace = "envoy-gateway-system"
 
-			r.processServiceClusterForGatewayClass(tc.envoyProxy, tc.gatewayClass, resourceMap)
+			r.processServiceClusterForGatewayClass(context.Background(), tc.envoyProxy, tc.gatewayClass, resourceMap)
 
-			require.Contains(t, resourceMap.allAssociatedBackendRefs, gwapiv1.BackendObjectReference{
-				Kind:      ptr.To(gwapiv1.Kind("Service")),
+			expectedRef := gwapiv1.BackendObjectReference{
+				Kind:      ptr.To(gwapiv1.Kind(resource.KindService)),
 				Namespace: gatewayapi.NamespacePtr(r.namespace),
 				Name:      gwapiv1.ObjectName(tc.expectedSvcName),
-			})
+			}
+			key := backendRefKey(&expectedRef)
+			if tc.serviceCluster != nil {
+				require.Contains(t, resourceMap.allAssociatedBackendRefs, key)
+				require.Equal(t, expectedRef, resourceMap.allAssociatedBackendRefs[key])
+			} else {
+				require.NotContains(t, resourceMap.allAssociatedBackendRefs, key)
+			}
 		})
 	}
 }
@@ -1321,6 +1362,7 @@ func TestProcessServiceClusterForGateway(t *testing.T) {
 		gatewayNamespacedMode  bool
 		expectedSvcName        string
 		expectedSvcNamespace   string
+		serviceCluster         []client.Object
 	}{
 		{
 			name: "no gateway namespaced mode with no hardcoded service name",
@@ -1349,7 +1391,7 @@ func TestProcessServiceClusterForGateway(t *testing.T) {
 				},
 				Spec: egv1a1.EnvoyProxySpec{
 					Provider: &egv1a1.EnvoyProxyProvider{
-						Type: egv1a1.ProviderTypeKubernetes,
+						Type: egv1a1.EnvoyProxyProviderTypeKubernetes,
 						Kubernetes: &egv1a1.EnvoyProxyKubernetesProvider{
 							EnvoyService: &egv1a1.KubernetesServiceSpec{
 								Name: ptr.To("my-gateway-svc"),
@@ -1374,6 +1416,14 @@ func TestProcessServiceClusterForGateway(t *testing.T) {
 			gatewayNamespacedMode: true,
 			expectedSvcName:       "my-gateway",
 			expectedSvcNamespace:  "app-namespace",
+			serviceCluster: []client.Object{
+				&corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "my-gateway",
+						Namespace: "app-namespace",
+					},
+				},
+			},
 		},
 		{
 			name: "gateway namespaced mode with hardcoded service name",
@@ -1389,7 +1439,7 @@ func TestProcessServiceClusterForGateway(t *testing.T) {
 				},
 				Spec: egv1a1.EnvoyProxySpec{
 					Provider: &egv1a1.EnvoyProxyProvider{
-						Type: egv1a1.ProviderTypeKubernetes,
+						Type: egv1a1.EnvoyProxyProviderTypeKubernetes,
 						Kubernetes: &egv1a1.EnvoyProxyKubernetesProvider{
 							EnvoyService: &egv1a1.KubernetesServiceSpec{
 								Name: ptr.To("my-gateway-svc"),
@@ -1401,6 +1451,14 @@ func TestProcessServiceClusterForGateway(t *testing.T) {
 			gatewayNamespacedMode: true,
 			expectedSvcName:       "my-gateway-svc",
 			expectedSvcNamespace:  "app-namespace",
+			serviceCluster: []client.Object{
+				&corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "my-gateway-svc",
+						Namespace: "app-namespace",
+					},
+				},
+			},
 		},
 		{
 			name: "no gateway namespaced mode with no hardcoded service name attached gatewayclass",
@@ -1417,7 +1475,7 @@ func TestProcessServiceClusterForGateway(t *testing.T) {
 				},
 				Spec: egv1a1.EnvoyProxySpec{
 					Provider: &egv1a1.EnvoyProxyProvider{
-						Type: egv1a1.ProviderTypeKubernetes,
+						Type: egv1a1.EnvoyProxyProviderTypeKubernetes,
 						Kubernetes: &egv1a1.EnvoyProxyKubernetesProvider{
 							EnvoyService: &egv1a1.KubernetesServiceSpec{
 								Name: ptr.To("my-gateway-svc"),
@@ -1440,6 +1498,10 @@ func TestProcessServiceClusterForGateway(t *testing.T) {
 			resourceMap := newResourceMapping()
 
 			r := newGatewayAPIReconciler(logger)
+			r.client = fakeclient.NewClientBuilder().
+				WithScheme(envoygateway.GetScheme()).
+				WithObjects(tc.serviceCluster...).
+				Build()
 			r.namespace = "envoy-gateway-system"
 			r.gatewayNamespaceMode = tc.gatewayNamespacedMode
 
@@ -1455,13 +1517,20 @@ func TestProcessServiceClusterForGateway(t *testing.T) {
 				tc.envoyProxy = tc.gatewayClassEnvoyProxy
 			}
 
-			r.processServiceClusterForGateway(tc.envoyProxy, tc.gateway, resourceMap)
+			r.processServiceClusterForGateway(context.Background(), tc.envoyProxy, tc.gateway, resourceMap)
 
-			require.Contains(t, resourceMap.allAssociatedBackendRefs, gwapiv1.BackendObjectReference{
-				Kind:      ptr.To(gwapiv1.Kind("Service")),
+			expectedRef := gwapiv1.BackendObjectReference{
+				Kind:      ptr.To(gwapiv1.Kind(resource.KindService)),
 				Namespace: gatewayapi.NamespacePtr(tc.expectedSvcNamespace),
 				Name:      gwapiv1.ObjectName(tc.expectedSvcName),
-			})
+			}
+			key := backendRefKey(&expectedRef)
+			if tc.serviceCluster != nil {
+				require.Contains(t, resourceMap.allAssociatedBackendRefs, key)
+				require.Equal(t, expectedRef, resourceMap.allAssociatedBackendRefs[key])
+			} else {
+				require.NotContains(t, resourceMap.allAssociatedBackendRefs, key)
+			}
 		})
 	}
 }
@@ -1479,6 +1548,23 @@ func newGatewayAPIReconciler(logger logging.Logger) *gatewayAPIReconciler {
 			},
 		},
 	}
+}
+
+func TestProcessBackendRefDeduplicatesLogicalBackend(t *testing.T) {
+	logger := logging.DefaultLogger(os.Stdout, egv1a1.LogLevelInfo)
+	r := newGatewayAPIReconciler(logger)
+	resourceTree := resource.NewResources()
+	resourceMap := newResourceMapping()
+
+	backendRef := gwapiv1.BackendObjectReference{
+		Namespace: gatewayapi.NamespacePtr("default"),
+		Name:      "svc",
+	}
+
+	require.NoError(t, r.processBackendRef(t.Context(), resourceMap, resourceTree, resource.KindHTTPRoute, "default", "route-a", backendRef))
+	require.NoError(t, r.processBackendRef(t.Context(), resourceMap, resourceTree, resource.KindHTTPRoute, "default", "route-b", backendRef))
+
+	require.Len(t, resourceMap.allAssociatedBackendRefs, 1)
 }
 
 func TestProcessBackendRefs(t *testing.T) {
@@ -1584,7 +1670,7 @@ func TestProcessBackendRefs(t *testing.T) {
 			resourceTree := resource.NewResources()
 			resourceMap := newResourceMapping()
 			backend := tc.backend
-			resourceMap.allAssociatedBackendRefs.Insert(gwapiv1.BackendObjectReference{
+			resourceMap.insertBackendRef(gwapiv1.BackendObjectReference{
 				Kind:      gatewayapi.KindPtr(resource.KindBackend),
 				Namespace: gatewayapi.NamespacePtr(backend.Namespace),
 				Name:      gwapiv1.ObjectName(backend.Name),

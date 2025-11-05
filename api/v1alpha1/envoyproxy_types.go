@@ -106,6 +106,8 @@ type EnvoyProxySpec struct {
 	//
 	// - envoy.filters.http.ext_authz
 	//
+	// - envoy.filters.http.api_key_auth
+	//
 	// - envoy.filters.http.basic_auth
 	//
 	// - envoy.filters.http.oauth2
@@ -113,6 +115,8 @@ type EnvoyProxySpec struct {
 	// - envoy.filters.http.jwt_authn
 	//
 	// - envoy.filters.http.stateful_session
+	//
+	// - envoy.filters.http.buffer
 	//
 	// - envoy.filters.http.lua
 	//
@@ -126,7 +130,15 @@ type EnvoyProxySpec struct {
 	//
 	// - envoy.filters.http.ratelimit
 	//
+	// - envoy.filters.http.grpc_web
+	//
+	// - envoy.filters.http.grpc_stats
+	//
 	// - envoy.filters.http.custom_response
+	//
+	// - envoy.filters.http.credential_injector
+	//
+	// - envoy.filters.http.compressor
 	//
 	// - envoy.filters.http.router
 	//
@@ -151,7 +163,7 @@ type EnvoyProxySpec struct {
 	IPFamily *IPFamily `json:"ipFamily,omitempty"`
 
 	// PreserveRouteOrder determines if the order of matching for HTTPRoutes is determined by Gateway-API
-	// specification (https://gateway-api.sigs.k8s.io/reference/spec/#gateway.networking.k8s.io/v1.HTTPRouteRule)
+	// specification (https://gateway-api.sigs.k8s.io/reference/1.4/spec/#httprouterule)
 	// or preserves the order defined by users in the HTTPRoute's HTTPRouteRule list.
 	// Default: False
 	//
@@ -222,7 +234,7 @@ type FilterPosition struct {
 }
 
 // EnvoyFilter defines the type of Envoy HTTP filter.
-// +kubebuilder:validation:Enum=envoy.filters.http.health_check;envoy.filters.http.fault;envoy.filters.http.cors;envoy.filters.http.ext_authz;envoy.filters.http.api_key_auth;envoy.filters.http.basic_auth;envoy.filters.http.oauth2;envoy.filters.http.jwt_authn;envoy.filters.http.stateful_session;envoy.filters.http.lua;envoy.filters.http.ext_proc;envoy.filters.http.wasm;envoy.filters.http.rbac;envoy.filters.http.local_ratelimit;envoy.filters.http.ratelimit;envoy.filters.http.custom_response;envoy.filters.http.compressor
+// +kubebuilder:validation:Enum=envoy.filters.http.health_check;envoy.filters.http.fault;envoy.filters.http.cors;envoy.filters.http.ext_authz;envoy.filters.http.api_key_auth;envoy.filters.http.basic_auth;envoy.filters.http.oauth2;envoy.filters.http.jwt_authn;envoy.filters.http.stateful_session;envoy.filters.http.buffer;envoy.filters.http.lua;envoy.filters.http.ext_proc;envoy.filters.http.wasm;envoy.filters.http.rbac;envoy.filters.http.local_ratelimit;envoy.filters.http.ratelimit;envoy.filters.http.grpc_web;envoy.filters.http.grpc_stats;envoy.filters.http.custom_response;envoy.filters.http.credential_injector;envoy.filters.http.compressor
 type EnvoyFilter string
 
 const (
@@ -293,6 +305,9 @@ const (
 	// EnvoyFilterBuffer defines the Envoy HTTP buffer filter
 	EnvoyFilterBuffer EnvoyFilter = "envoy.filters.http.buffer"
 
+	// EnvoyFilterHeaderMutation defines the Envoy HTTP header mutation filter
+	EnvoyFilterHeaderMutation EnvoyFilter = "envoy.filters.http.header_mutation"
+
 	// StatFormatterRouteName defines the Route Name formatter for stats
 	StatFormatterRouteName string = "%ROUTE_NAME%"
 
@@ -326,15 +341,28 @@ type ProxyTelemetry struct {
 	Metrics *ProxyMetrics `json:"metrics,omitempty"`
 }
 
+// EnvoyProxyProviderType defines the types of providers supported by Envoy Proxy.
+//
+// +kubebuilder:validation:Enum=Kubernetes;Host
+type EnvoyProxyProviderType string
+
+const (
+	// EnvoyProxyProviderTypeKubernetes defines the "Kubernetes" provider.
+	EnvoyProxyProviderTypeKubernetes EnvoyProxyProviderType = "Kubernetes"
+
+	// EnvoyProxyProviderTypeHost defines the "Host" provider.
+	EnvoyProxyProviderTypeHost EnvoyProxyProviderType = "Host"
+)
+
 // EnvoyProxyProvider defines the desired state of a resource provider.
 // +union
 type EnvoyProxyProvider struct {
 	// Type is the type of resource provider to use. A resource provider provides
 	// infrastructure resources for running the data plane, e.g. Envoy proxy, and
-	// optional auxiliary control planes. Supported types are "Kubernetes".
+	// optional auxiliary control planes. Supported types are "Kubernetes"and "Host".
 	//
 	// +unionDiscriminator
-	Type ProviderType `json:"type"`
+	Type EnvoyProxyProviderType `json:"type"`
 	// Kubernetes defines the desired state of the Kubernetes resource provider.
 	// Kubernetes provides infrastructure resources for running the data plane,
 	// e.g. Envoy proxy. If unspecified and type is "Kubernetes", default settings
@@ -342,6 +370,13 @@ type EnvoyProxyProvider struct {
 	//
 	// +optional
 	Kubernetes *EnvoyProxyKubernetesProvider `json:"kubernetes,omitempty"`
+	// Host provides runtime deployment of the data plane as a child process on the
+	// host environment.
+	// If unspecified and type is "Host", default settings for the custom provider
+	// are applied.
+	//
+	// +optional
+	Host *EnvoyProxyHostProvider `json:"host,omitempty"`
 }
 
 // ShutdownConfig defines configuration for graceful envoy shutdown process.
@@ -402,6 +437,15 @@ type EnvoyProxyKubernetesProvider struct {
 
 	// EnvoyServiceAccount defines the desired state of the Envoy service account resource.
 	EnvoyServiceAccount *KubernetesServiceAccountSpec `json:"envoyServiceAccount,omitempty"`
+}
+
+// EnvoyProxyHostProvider defines configuration for the "Host" resource provider.
+type EnvoyProxyHostProvider struct {
+	// EnvoyVersion is the version of Envoy to use. If unspecified, the version
+	// against which Envoy Gateway is built will be used.
+	//
+	// +optional
+	EnvoyVersion *string `json:"envoyVersion,omitempty"`
 }
 
 type KubernetesServiceAccountSpec struct {

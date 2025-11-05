@@ -380,7 +380,7 @@ spec:
 * The user has created two `RateLimitFilter`s  and has attached it to a `HTTPRoute` - one(`ratelimit-all-safeguard-app`) to
 ensure that the backend does not get overwhelmed with requests, any excess requests are rate limited irrespective of
 the attributes within the traffic flow, and another(`ratelimit-per-user`) to rate limit each distinct user client
-who can be differentiated using the `x-user-id` header, to ensure that each client does not make exessive requests to the backend.
+who can be differentiated using the `x-user-id` header, to ensure that each client does not make excessive requests to the backend.
 * If user `baz` (identified with the header and value of `x-user-id: baz`) sends 90 requests within the first second, and
 user `bar` sends 11 more requests during that same interval of 1 second, and user `bar` sends the 101th request within that second,
 the rule defined in `ratelimit-all-safeguard-app` gets activated and Envoy Gateway will ratelimit the request sent by `bar` (and any other
@@ -429,12 +429,12 @@ attribute such as [IP subnet][] in the future that are not relevant in the [HTTP
   * A Status field within the RateLimitFilter API will be added to reflect whether the specific configuration was programmed correctly in these multiple locations or not.
 
 [PolicyAttachment]: https://gateway-api.sigs.k8s.io/references/policy-attachment/
-[HTTPRoute]: https://gateway-api.sigs.k8s.io/reference/spec/#gateway.networking.k8s.io/v1.HTTPRoute
-[HTTPRouteRule]: https://gateway-api.sigs.k8s.io/reference/spec/#gateway.networking.k8s.io/v1.HTTPRouteRule
-[HTTPBackendRef]: https://gateway-api.sigs.k8s.io/reference/spec/#gateway.networking.k8s.io/v1.HTTPBackendRef
-[matches]: https://gateway-api.sigs.k8s.io/reference/spec/#gateway.networking.k8s.io/v1.HTTPRouteMatch
-[rule]: https://gateway-api.sigs.k8s.io/reference/spec/#gateway.networking.k8s.io/v1.HTTPRouteMatch
-[extensionRef]: https://gateway-api.sigs.k8s.io/reference/spec/#gateway.networking.k8s.io/v1.HTTPRouteFilterType
+[HTTPRoute]: https://gateway-api.sigs.k8s.io/reference/1.4/spec/#httproute
+[HTTPRouteRule]: https://gateway-api.sigs.k8s.io/reference/1.4/spec/#httprouteRule
+[HTTPBackendRef]: https://gateway-api.sigs.k8s.io/reference/1.4/spec/#httpbackendref
+[matches]: https://gateway-api.sigs.k8s.io/reference/1.4/spec/#httprouteMatch
+[rule]: https://gateway-api.sigs.k8s.io/reference/1.4/spec/#httprouteMatch
+[extensionRef]: https://gateway-api.sigs.k8s.io/reference/1.4/spec/#httproutefiltertype
 [IP subnet]: https://en.wikipedia.org/wiki/Subnetwork
 [Actions]: https://www.envoyproxy.io/docs/envoy/latest/api-v3/config/route/v3/route_components.proto#envoy-v3-api-msg-config-route-v3-ratelimit-action
 [descriptors]: https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/rate_limit_filter.html?highlight=descriptor#example-1

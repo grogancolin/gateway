@@ -10,7 +10,8 @@ refer to the [Gateway API documentation][].
 A [`RequestHeaderModifier` filter][req_filter] instructs Gateways to modify the headers in requests that match the rule
 before forwarding the request upstream. Note that the `RequestHeaderModifier` filter will only modify headers before the
 request is sent from Envoy to the upstream service and will not affect response headers returned to the downstream
-client.
+client. Header values support Envoy [format strings][envoy-format-strings], enabling dynamic values sourced from the
+request and connection metadata.
 
 ## Prerequisites
 
@@ -440,6 +441,8 @@ spec:
 ## Early Header Modification
 
 In some cases, it could be necessary to modify headers before the proxy performs any sort of processing, routing or tracing. Envoy Gateway supports this functionality using the [ClientTrafficPolicy][] API.
+The same Envoy [format strings][envoy-format-strings] used with `RequestHeaderModifier` values also apply to early
+header modifications, allowing dynamic data to be populated ahead of routing.
 
 A [ClientTrafficPolicy][] resource can be attached to a [Gateway][] resource to configure early header modifications for all its routes. In the following example we will demonstrate how early header modification can be configured.
 
@@ -609,8 +612,9 @@ $ curl -vvv --header "Host: headers.example" "http://${GATEWAY_HOST}/get" --head
 ```
 
 [HTTPRoute]: https://gateway-api.sigs.k8s.io/api-types/httproute/
-[HTTPRoute filters]: https://gateway-api.sigs.k8s.io/reference/spec#gateway.networking.k8s.io/v1.HTTPRouteFilter
+[HTTPRoute filters]: https://gateway-api.sigs.k8s.io/reference/1.4/spec#httproutefilter
 [Gateway API documentation]: https://gateway-api.sigs.k8s.io/
-[req_filter]: https://gateway-api.sigs.k8s.io/reference/spec#gateway.networking.k8s.io/v1.HTTPHeaderFilter
+[req_filter]: https://gateway-api.sigs.k8s.io/reference/1.4/spec#httpheaderfilter
 [Gateway]: https://gateway-api.sigs.k8s.io/api-types/gateway/
 [ClientTrafficPolicy]: ../../../api/extension_types#clienttrafficpolicy
+[envoy-format-strings]: https://www.envoyproxy.io/docs/envoy/latest/configuration/observability/access_log/usage#config-access-log-format

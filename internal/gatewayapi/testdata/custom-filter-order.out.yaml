@@ -2,7 +2,6 @@ envoyExtensionPolicies:
 - apiVersion: gateway.envoyproxy.io/v1alpha1
   kind: EnvoyExtensionPolicy
   metadata:
-    creationTimestamp: null
     name: policy-for-gateway
     namespace: envoy-gateway
   spec:
@@ -49,7 +48,6 @@ gateways:
 - apiVersion: gateway.networking.k8s.io/v1
   kind: Gateway
   metadata:
-    creationTimestamp: null
     name: gateway-1
     namespace: envoy-gateway
   spec:
@@ -90,7 +88,6 @@ httpRoutes:
 - apiVersion: gateway.networking.k8s.io/v1
   kind: HTTPRoute
   metadata:
-    creationTimestamp: null
     name: httproute-1
     namespace: envoy-gateway
   spec:
@@ -132,14 +129,13 @@ infraIR:
         apiVersion: gateway.envoyproxy.io/v1alpha1
         kind: EnvoyProxy
         metadata:
-          creationTimestamp: null
           name: custom-proxy-config
           namespace: envoy-gateway-system
         spec:
           filterOrder:
           - before: envoy.filters.http.jwt_authn
             name: envoy.filters.http.wasm
-          - after: envoy.filters.http.basic_authn
+          - after: envoy.filters.http.basic_auth
             name: envoy.filters.http.cors
           logging: {}
         status: {}
@@ -164,7 +160,6 @@ securityPolicies:
 - apiVersion: gateway.envoyproxy.io/v1alpha1
   kind: SecurityPolicy
   metadata:
-    creationTimestamp: null
     name: policy-for-gateway
     namespace: envoy-gateway
   spec:
@@ -226,7 +221,7 @@ xdsIR:
     filterOrder:
     - before: envoy.filters.http.jwt_authn
       name: envoy.filters.http.wasm
-    - after: envoy.filters.http.basic_authn
+    - after: envoy.filters.http.basic_auth
       name: envoy.filters.http.cors
     globalResources:
       envoyClientCertificate:
@@ -234,6 +229,10 @@ xdsIR:
         name: envoy-gateway-system/envoy
         privateKey: '[redacted]'
       proxyServiceCluster:
+        metadata:
+          name: envoy-envoy-gateway-gateway-1-196ae069
+          namespace: envoy-gateway-system
+          sectionName: "8080"
         name: envoy-gateway/gateway-1
         settings:
         - addressType: IP
